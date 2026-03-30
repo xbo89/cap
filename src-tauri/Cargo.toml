@@ -1,0 +1,34 @@
+[package]
+name = "screencap"
+version = "0.1.0"
+description = "A lightweight screen recorder with mouse-following zoom"
+authors = ["you"]
+edition = "2021"
+
+[lib]
+name = "screencap_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+tauri = { version = "2", features = [ "tray-icon", "image-png", "macos-private-api"] }
+tauri-plugin-opener = "2"
+tauri-plugin-dialog = "2"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+uuid = { version = "1", features = ["v4"] }
+tokio = { version = "1", features = ["full"] }
+objc2 = "0.6"
+objc2-foundation = { version = "0.3", features = ["NSString", "NSArray", "NSError", "NSDictionary", "NSThread"] }
+block2 = "0.6"
+dirs = "6"
+urlencoding = "2"
+log = "0.4"
+env_logger = "0.11"
+tauri-plugin-global-shortcut = "2"
+
+[target.'cfg(target_os = "macos")'.dependencies]
+core-graphics = "0.24"
+core-graphics-types = "0.2"

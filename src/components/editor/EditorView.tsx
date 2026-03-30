@@ -1,0 +1,448 @@
+import { useEffect, useRef, useCallback, useState } from "react";
+import { useAppStore } from "@/lib/store";
+import { ipc } from "@/lib/ipc";
+import type { Clip, Subtitle, SubtitleStyle } from "@/lib/ipc";
+import { Button } from "@/components/ui/button";
+import { PreviewCanvas } from "@/components/recording/PreviewCanvas";
+import { ZoomSettings } from "@/components/zoom/ZoomSettings";
+import { SubtitleProperties } from "@/components/subtitle/SubtitleProperties";
+import { Timeline } from "@/components/editor/Timeline";
+import { ExportPanel } from "@/components/export/ExportPanel";
+import { useKeyboard } from "@/hooks/useKeyboard";
+import { videoUrl } from "@/lib/video-url";
+import { useThumbnails } from "@/hooks/useThumbnails";
+import { PanelLeft, Download, Save, Check, Play, Pause, ArrowLeft } from "lucide-react";
+import { SessionSidebar } from "@/components/editor/SessionSidebar";
+
+export function EditorView() {
+  const {
+    currentSession,
+    mouseEvents,
+    setMouseEvents,
+    zoomEnabled,
+    zoomConfig,
+    setZoomEnabled,
+    setZoomConfig,
+    setView,
+  } = useAppStore();
+
+  const [waveform, setWaveform] = useState<number[]>([]);
+  const [duration, setDuration] = useState(0);
+  const [currentTime, setCurrentTime] = useState(0);
+  const [clips, setClips] = useState<Clip[]>([]);
+  const [subtitles, setSubtitles] = useState<Subtitle[]>([]);
+  const [showExport, setShowExport] = useState(false);
+  const [isPlaying, setIsPlaying] = useState(false);
+  const [selectedSubtitleIndex, setSelectedSubtitleIndex] = useState<number | null>(null);
+  const [sidebarOpen, setSidebarOpen] = useState(false);
+  const [saveStatus, setSaveStatus] = useState<"idle" | "saving" | "saved">("idle");
+  const videoRef = useRef<HTMLVideoElement>(null);
+  // Refs for playback loop (avoid stale closures in RAF)
+  const clipsRef = useRef(clips);
+  clipsRef.current = clips;
+  const currentTimeRef = useRef(currentTime);
+  currentTimeRef.current = currentTime;
+
+  const sessionId = currentSession?.session_id;
+
+  // Dynamic timeline duration: expand beyond source when clips are moved
+  const timelineDuration = Math.max(
+    duration,
+    ...clips.map(c => c.end_time),
+  ) + 10; // 10s buffer for dragging room
+
+  // Load session data
+  useEffect(() => {
+    if (!sessionId) return;
+    ipc.getMouseMetadata(sessionId).then(setMouseEvents).catch(console.error);
+    ipc.getWaveform(sessionId, 100).then(setWaveform).catch(console.error);
+    ipc.getVideoDuration(sessionId).then((d) => {
+      setDuration(d);
+      setClips([{ start_time: 0, end_time: d, media_offset: 0 }]);
+    }).catch(console.error);
+    ipc.loadProject(sessionId).then((project) => {
+      if (project) {
+        // Migrate old projects: if media_offset is undefined/null, use start_time
+        setClips(project.clips.map(c => ({
+          ...c,
+          media_offset: c.media_offset ?? c.start_time,
+        })));
+        setSubtitles(project.subtitles);
+        if (project.zoom_effect) {
+          setZoomEnabled(project.zoom_effect.enabled);
+          setZoomConfig({
+            zoomLevel: project.zoom_effect.zoom_level,
+            followSpeed: project.zoom_effect.follow_speed,
+            padding: project.zoom_effect.padding,
+          });
+        }
+      }
+    }).catch(console.error);
+  }, [sessionId, setMouseEvents, setZoomEnabled, setZoomConfig]);
+
+  // Map timeline time → source video time via clip media_offset
+  const timelineToSource = useCallback((tlTime: number): number | null => {
+    const sorted = [...clips].sort((a, b) => a.start_time - b.start_time);
+    for (const clip of sorted) {
+      if (tlTime >= clip.start_time && tlTime <= clip.end_time) {
+        return clip.media_offset + (tlTime - clip.start_time);
+      }
+    }
+    return null;
+  }, [clips]);
+
+  // Seek: set timeline time and sync video to source time
+  const handleSeek = useCallback((time: number) => {
+    setCurrentTime(time);
+    currentTimeRef.current = time;
+    const video = videoRef.current;
+    if (!video) return;
+    const srcTime = timelineToSource(time);
+    if (srcTime !== null) {
+      video.currentTime = srcTime;
+    }
+  }, [timelineToSource]);
+
+  const togglePlay = useCallback(() => {
+    setIsPlaying(prev => !prev);
+  }, []);
+
+  // Playback engine: RAF-driven timeline clock, syncing video to source time.
+  // Plays through gaps as black frames (no skipping).
+  useEffect(() => {
+    if (!isPlaying) return;
+    const video = videoRef.current;
+    if (!video) return;
+
+    let rafId: number;
+    let lastTs = performance.now();
+    let lastActiveClipStart = -1; // track clip transitions to re-seek
+
+    // Initial seek if starting inside a clip
+    const initClips = [...clipsRef.current].sort((a, b) => a.start_time - b.start_time);
+    const initClip = initClips.find(c => currentTimeRef.current >= c.start_time && currentTimeRef.current <= c.end_time);
+    if (initClip) {
+      video.currentTime = initClip.media_offset + (currentTimeRef.current - initClip.start_time);
+      video.play().catch(() => {});
+      lastActiveClipStart = initClip.start_time;
+    }
+
+    const tick = (ts: number) => {
+      const dt = Math.min((ts - lastTs) / 1000, 0.1);
+      lastTs = ts;
+
+      const sorted = [...clipsRef.current].sort((a, b) => a.start_time - b.start_time);
+      const newTime = currentTimeRef.current + dt;
+
+      // Check if past all content (past last clip's end)
+      const lastClip = sorted[sorted.length - 1];
+      if (!lastClip || newTime > (lastClip?.end_time ?? 0) + 0.5) {
+        video.pause();
+        currentTimeRef.current = newTime;
+        setCurrentTime(newTime);
+        setIsPlaying(false);
+        return;
+      }
+
+      const activeClip = sorted.find(c => newTime >= c.start_time && newTime <= c.end_time);
+
+      if (activeClip) {
+        // Inside a clip: ensure video is playing at correct source position
+        const expectedSrc = activeClip.media_offset + (newTime - activeClip.start_time);
+
+        // Re-seek when entering a new clip or if drifted
+        if (lastActiveClipStart !== activeClip.start_time || Math.abs(video.currentTime - expectedSrc) > 0.2) {
+          video.currentTime = expectedSrc;
+          lastActiveClipStart = activeClip.start_time;
+        }
+        if (video.paused) video.play().catch(() => {});
+      } else {
+        // In a gap: pause video, preview shows black
+        if (!video.paused) video.pause();
+        lastActiveClipStart = -1;
+      }
+
+      currentTimeRef.current = newTime;
+      setCurrentTime(newTime);
+      rafId = requestAnimationFrame(tick);
+    };
+
+    rafId = requestAnimationFrame(tick);
+    return () => {
+      cancelAnimationFrame(rafId);
+      video.pause();
+    };
+  }, [isPlaying]);
+
+  const handleSplit = useCallback(() => {
+    // Split selected subtitle if playhead is within it
+    if (selectedSubtitleIndex !== null) {
+      const sub = subtitles[selectedSubtitleIndex];
+      if (sub && currentTime > sub.start_time + 0.1 && currentTime < sub.end_time - 0.1) {
+        const newSubs = [...subtitles];
+        const left = { ...sub, end_time: currentTime };
+        const right = { ...sub, start_time: currentTime };
+        newSubs.splice(selectedSubtitleIndex, 1, left, right);
+        setSubtitles(newSubs);
+        return;
+      }
+    }
+    // Otherwise split video clip
+    const newClips: Clip[] = [];
+    for (const clip of clips) {
+      if (currentTime > clip.start_time + 0.1 && currentTime < clip.end_time - 0.1) {
+        const leftDur = currentTime - clip.start_time;
+        newClips.push({ start_time: clip.start_time, end_time: currentTime, media_offset: clip.media_offset });
+        newClips.push({ start_time: currentTime, end_time: clip.end_time, media_offset: clip.media_offset + leftDur });
+      } else {
+        newClips.push(clip);
+      }
+    }
+    setClips(newClips);
+  }, [clips, subtitles, currentTime, selectedSubtitleIndex]);
+
+  const handleSave = useCallback(async () => {
+    if (!sessionId) return;
+    setSaveStatus("saving");
+    await ipc.saveProject(sessionId, {
+      session_id: sessionId,
+      clips,
+      subtitles,
+      zoom_effect: {
+        enabled: zoomEnabled,
+        zoom_level: zoomConfig.zoomLevel,
+        follow_speed: zoomConfig.followSpeed,
+        padding: zoomConfig.padding,
+      },
+      export_settings: {
+        format: "Mp4H264",
+        quality: "High",
+        resolution: null,
+        burn_subtitles: true,
+      },
+    });
+    setSaveStatus("saved");
+    setTimeout(() => setSaveStatus("idle"), 2000);
+  }, [sessionId, clips, subtitles, zoomEnabled, zoomConfig]);
+
+  // Auto-save: debounce 3s after edits
+  const autoSaveTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  useEffect(() => {
+    if (!sessionId || clips.length === 0) return;
+    if (autoSaveTimer.current) clearTimeout(autoSaveTimer.current);
+    autoSaveTimer.current = setTimeout(() => { handleSave(); }, 3000);
+    return () => { if (autoSaveTimer.current) clearTimeout(autoSaveTimer.current); };
+  }, [clips, subtitles, zoomEnabled, zoomConfig, sessionId, handleSave]);
+
+  // Open a different session from the sidebar
+  const handleOpenSession = useCallback(async (sid: string) => {
+    const { setCurrentSession, setMouseEvents: setME } = useAppStore.getState();
+    try {
+      const dur = await ipc.getVideoDuration(sid);
+      const sessDir = currentSession?.video_path?.replace(/\/video\.mp4$/, "") || "";
+      const basePath = sessDir.replace(/\/[^/]+$/, "");
+      setCurrentSession({
+        session_id: sid,
+        duration_secs: dur,
+        video_path: `${basePath}/${sid}/video.mp4`,
+        metadata_path: `${basePath}/${sid}/metadata.json`,
+        file_size_mb: 0,
+      });
+      const events = await ipc.getMouseMetadata(sid);
+      setME(events);
+    } catch (e) {
+      console.error("Failed to open session:", e);
+    }
+  }, [currentSession]);
+
+  // Subtitle style change from canvas drag or properties panel
+  const handleSubtitleStyleChange = useCallback((index: number, style: SubtitleStyle) => {
+    setSubtitles(prev => {
+      const newSubs = [...prev];
+      newSubs[index] = { ...newSubs[index], style };
+      return newSubs;
+    });
+  }, []);
+
+  // Subtitle text change from properties panel
+  const handleSubtitleTextChange = useCallback((index: number, text: string) => {
+    setSubtitles(prev => {
+      const newSubs = [...prev];
+      newSubs[index] = { ...newSubs[index], text };
+      return newSubs;
+    });
+  }, []);
+
+  useKeyboard([
+    { key: " ", action: togglePlay },
+    { key: "s", action: handleSplit },
+    { key: "s", meta: true, action: handleSave },
+    { key: "e", meta: true, action: () => setShowExport(true) },
+    {
+      key: "Backspace",
+      action: () => {
+        if (selectedSubtitleIndex !== null) {
+          setSubtitles((prev) => prev.filter((_, i) => i !== selectedSubtitleIndex));
+          setSelectedSubtitleIndex(null);
+        } else {
+          setClips((prev) =>
+            prev.filter((c) => !(currentTime >= c.start_time && currentTime <= c.end_time))
+          );
+        }
+      },
+    },
+    {
+      key: "Escape",
+      action: () => setSelectedSubtitleIndex(null),
+    },
+  ]);
+
+  if (!currentSession) {
+    return (
+      <div className="flex flex-col items-center justify-center h-full gap-4">
+        <p className="text-muted-foreground">No recording loaded</p>
+        <Button variant="outline" onClick={() => setView("recording")}>
+          <ArrowLeft className="mr-2 h-4 w-4" />
+          Back to Recording
+        </Button>
+      </div>
+    );
+  }
+
+  const videoSrcUrl = videoUrl(currentSession.video_path);
+  const thumbnails = useThumbnails(videoSrcUrl, duration);
+  const selectedSub = selectedSubtitleIndex !== null ? subtitles[selectedSubtitleIndex] : null;
+
+  return (
+    <div className="flex flex-col h-full">
+      {/* Top bar */}
+      <div className="flex items-center justify-between px-4 py-2 border-b border-border">
+        <div className="flex items-center gap-2">
+          <Button variant="ghost" size="sm" onClick={() => setSidebarOpen((v) => !v)} title="Toggle recordings panel">
+            <PanelLeft className="h-4 w-4" />
+          </Button>
+          <div className="text-sm text-muted-foreground">
+            {currentSession.duration_secs.toFixed(1)}s |{" "}
+            {currentSession.file_size_mb.toFixed(1)} MB
+          </div>
+        </div>
+        <div className="flex items-center gap-2">
+          <Button variant="outline" size="sm" onClick={handleSave} disabled={saveStatus === "saving"}>
+            {saveStatus === "saved" ? (
+              <><Check className="mr-2 h-4 w-4 text-green-500" />Saved</>
+            ) : (
+              <><Save className="mr-2 h-4 w-4" />Save</>
+            )}
+          </Button>
+          <Button size="sm" onClick={() => setShowExport(true)}>
+            <Download className="mr-2 h-4 w-4" />
+            Export
+          </Button>
+        </div>
+      </div>
+
+      {/* Main content: Sidebar + Preview + Settings */}
+      <div className="flex-1 flex min-h-0">
+        {/* Left sidebar: session history */}
+        {sidebarOpen && (
+          <SessionSidebar
+            currentSessionId={sessionId}
+            onOpenSession={handleOpenSession}
+          />
+        )}
+        {/* Video preview */}
+        <div className="flex-1 flex flex-col items-center justify-center p-4 min-h-0">
+          <div className="flex-1 min-h-0 w-full max-w-3xl flex items-center justify-center">
+            <video ref={videoRef} src={videoSrcUrl} className="hidden" playsInline preload="auto" />
+            <PreviewCanvas
+              videoRef={videoRef}
+              mouseEvents={mouseEvents}
+              clips={clips}
+              subtitles={subtitles}
+              timelineTime={currentTime}
+              isPlaying={isPlaying}
+              zoomConfig={zoomConfig}
+              zoomEnabled={zoomEnabled}
+              selectedSubtitleIndex={selectedSubtitleIndex}
+              onSubtitleSelect={setSelectedSubtitleIndex}
+              onSubtitleStyleChange={handleSubtitleStyleChange}
+              width={1920}
+              height={1080}
+            />
+          </div>
+          <div className="flex-none flex justify-center mt-2">
+            <button
+              className="flex items-center gap-1.5 px-4 py-1.5 rounded-md bg-secondary text-foreground hover:bg-secondary/80 text-sm"
+              onClick={togglePlay}
+            >
+              {isPlaying ? <Pause className="h-4 w-4" /> : <Play className="h-4 w-4" />}
+              {isPlaying ? "Pause" : "Play"}
+            </button>
+          </div>
+        </div>
+
+        {/* Right sidebar: context-dependent */}
+        <div className="w-72 border-l border-border p-4 overflow-y-auto">
+          {selectedSub ? (
+            <SubtitleProperties
+              subtitle={selectedSub}
+              onTextChange={(text) => handleSubtitleTextChange(selectedSubtitleIndex!, text)}
+              onStyleChange={(style) => handleSubtitleStyleChange(selectedSubtitleIndex!, style)}
+            />
+          ) : (
+            <ZoomSettings
+              config={zoomConfig}
+              enabled={zoomEnabled}
+              onConfigChange={setZoomConfig}
+              onEnabledChange={setZoomEnabled}
+            />
+          )}
+        </div>
+      </div>
+
+      {/* Timeline */}
+      <div className="border-t border-border">
+        <Timeline
+          duration={timelineDuration}
+          sourceDuration={duration}
+          currentTime={currentTime}
+          waveform={waveform}
+          clips={clips}
+          thumbnails={thumbnails}
+          subtitles={subtitles}
+          selectedSubtitleIndex={selectedSubtitleIndex}
+          onSubtitleSelect={setSelectedSubtitleIndex}
+          onSeek={handleSeek}
+          onClipsChange={setClips}
+          onSubtitlesChange={setSubtitles}
+          onSplit={handleSplit}
+        />
+      </div>
+
+      {/* Export modal */}
+      {showExport && sessionId && (
+        <ExportPanel
+          sessionId={sessionId}
+          project={{
+            session_id: sessionId,
+            clips,
+            subtitles,
+            zoom_effect: {
+              enabled: zoomEnabled,
+              zoom_level: zoomConfig.zoomLevel,
+              follow_speed: zoomConfig.followSpeed,
+              padding: zoomConfig.padding,
+            },
+            export_settings: {
+              format: "Mp4H264",
+              quality: "High",
+              resolution: null,
+              burn_subtitles: true,
+            },
+          }}
+          onClose={() => setShowExport(false)}
+        />
+      )}
+    </div>
+  );
+}
