@@ -11,8 +11,7 @@ import { ExportPanel } from "@/components/export/ExportPanel";
 import { useKeyboard } from "@/hooks/useKeyboard";
 import { videoUrl } from "@/lib/video-url";
 import { useThumbnails } from "@/hooks/useThumbnails";
-import { PanelLeft, Download, Save, Check, Play, Pause, ArrowLeft } from "lucide-react";
-import { SessionSidebar } from "@/components/editor/SessionSidebar";
+import { PanelLeft, Download, Save, Check, Play, Pause, FolderOpen } from "lucide-react";
 
 export function EditorView() {
   const {
@@ -23,7 +22,6 @@ export function EditorView() {
     setZoomSegments,
     selectedZoomSegmentIndex,
     setSelectedZoomSegmentIndex,
-    setView,
   } = useAppStore();
 
   const [waveform, setWaveform] = useState<number[]>([]);
@@ -35,7 +33,6 @@ export function EditorView() {
   const [isPlaying, setIsPlaying] = useState(false);
   const [selectedSubtitleIndex, setSelectedSubtitleIndex] = useState<number | null>(null);
   const [captureRegion, setCaptureRegion] = useState<CaptureRegion | null>(null);
-  const [sidebarOpen, setSidebarOpen] = useState(false);
   const [saveStatus, setSaveStatus] = useState<"idle" | "saving" | "saved">("idle");
   const videoRef = useRef<HTMLVideoElement>(null);
   // Refs for playback loop (avoid stale closures in RAF)
@@ -258,27 +255,6 @@ export function EditorView() {
     return () => { if (autoSaveTimer.current) clearTimeout(autoSaveTimer.current); };
   }, [clips, subtitles, zoomSegments, sessionId, handleSave]);
 
-  // Open a different session from the sidebar
-  const handleOpenSession = useCallback(async (sid: string) => {
-    const { setCurrentSession, setMouseEvents: setME } = useAppStore.getState();
-    try {
-      const dur = await ipc.getVideoDuration(sid);
-      const sessDir = currentSession?.video_path?.replace(/\/video\.mp4$/, "") || "";
-      const basePath = sessDir.replace(/\/[^/]+$/, "");
-      setCurrentSession({
-        session_id: sid,
-        duration_secs: dur,
-        video_path: `${basePath}/${sid}/video.mp4`,
-        metadata_path: `${basePath}/${sid}/metadata.json`,
-        file_size_mb: 0,
-      });
-      const events = await ipc.getMouseMetadata(sid);
-      setME(events);
-    } catch (e) {
-      console.error("Failed to open session:", e);
-    }
-  }, [currentSession]);
-
   // Subtitle style change from canvas drag or properties panel
   const handleSubtitleStyleChange = useCallback((index: number, style: SubtitleStyle) => {
     setSubtitles(prev => {
@@ -351,10 +327,6 @@ export function EditorView() {
     return (
       <div className="flex flex-col items-center justify-center h-full gap-4">
         <p className="text-muted-foreground">No recording loaded</p>
-        <Button variant="outline" onClick={() => setView("recording")}>
-          <ArrowLeft className="mr-2 h-4 w-4" />
-          Back to Recording
-        </Button>
       </div>
     );
   }
@@ -369,7 +341,7 @@ export function EditorView() {
       {/* Top bar */}
       <div className="flex items-center justify-between px-4 py-2 border-b border-border">
         <div className="flex items-center gap-2">
-          <Button variant="ghost" size="sm" onClick={() => setSidebarOpen((v) => !v)} title="Toggle recordings panel">
+          <Button variant="ghost" size="sm" onClick={() => ipc.showSessionsBrowser()} title="Open recordings panel">
             <PanelLeft className="h-4 w-4" />
           </Button>
           <div className="text-sm text-muted-foreground">
@@ -378,6 +350,9 @@ export function EditorView() {
           </div>
         </div>
         <div className="flex items-center gap-2">
+          <Button variant="ghost" size="sm" onClick={() => sessionId && ipc.showInFinder(sessionId)} title="Open in Finder">
+            <FolderOpen className="h-4 w-4" />
+          </Button>
           <Button variant="outline" size="sm" onClick={handleSave} disabled={saveStatus === "saving"}>
             {saveStatus === "saved" ? (
               <><Check className="mr-2 h-4 w-4 text-green-500" />Saved</>
@@ -394,13 +369,6 @@ export function EditorView() {
 
       {/* Main content: Sidebar + Preview + Settings */}
       <div className="flex-1 flex min-h-0">
-        {/* Left sidebar: session history */}
-        {sidebarOpen && (
-          <SessionSidebar
-            currentSessionId={sessionId}
-            onOpenSession={handleOpenSession}
-          />
-        )}
         {/* Video preview */}
         <div className="flex-1 flex flex-col items-center justify-center p-4 min-h-0">
           <div className="flex-1 min-h-0 w-full max-w-3xl flex items-center justify-center">
@@ -432,21 +400,23 @@ export function EditorView() {
           </div>
         </div>
 
-        {/* Right sidebar: context-dependent */}
-        <div className="w-72 border-l border-border p-4 overflow-y-auto">
-          {selectedSub ? (
-            <SubtitleProperties
-              subtitle={selectedSub}
-              onTextChange={(text) => handleSubtitleTextChange(selectedSubtitleIndex!, text)}
-              onStyleChange={(style) => handleSubtitleStyleChange(selectedSubtitleIndex!, style)}
-            />
-          ) : (
-            <ZoomSettings
-              segment={selectedZoomSeg}
-              onSegmentChange={handleZoomSegmentChange}
-            />
-          )}
-        </div>
+        {/* Right sidebar: only shown when an element is selected */}
+        {(selectedSub || selectedZoomSeg) && (
+          <div className="w-72 border-l border-border p-4 overflow-y-auto">
+            {selectedSub ? (
+              <SubtitleProperties
+                subtitle={selectedSub}
+                onTextChange={(text) => handleSubtitleTextChange(selectedSubtitleIndex!, text)}
+                onStyleChange={(style) => handleSubtitleStyleChange(selectedSubtitleIndex!, style)}
+              />
+            ) : (
+              <ZoomSettings
+                segment={selectedZoomSeg}
+                onSegmentChange={handleZoomSegmentChange}
+              />
+            )}
+          </div>
+        )}
       </div>
 
       {/* Timeline */}

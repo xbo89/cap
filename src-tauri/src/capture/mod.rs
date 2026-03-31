@@ -21,8 +21,14 @@ pub struct RecordingConfig {
     pub fps: u32,
     pub capture_audio: bool,
     pub capture_mic: bool,
+    #[serde(default = "default_capture_mouse")]
+    pub capture_mouse: bool,
     #[serde(default)]
     pub region: Option<CaptureRegion>,
+}
+
+fn default_capture_mouse() -> bool {
+    true
 }
 
 impl Default for RecordingConfig {
@@ -32,6 +38,7 @@ impl Default for RecordingConfig {
             fps: 60,
             capture_audio: true,
             capture_mic: true,
+            capture_mouse: true,
             region: None,
         }
     }
@@ -72,4 +79,15 @@ pub fn sessions_dir() -> PathBuf {
         .join("sessions");
     std::fs::create_dir_all(&data_dir).ok();
     data_dir
+}
+
+/// Get the directory path for a specific session.
+/// Session directories use .capcap extension (macOS bundle format).
+pub fn session_dir(session_id: &str) -> PathBuf {
+    let dir_name = if session_id.ends_with(".capcap") {
+        session_id.to_string()
+    } else {
+        format!("{}.capcap", session_id)
+    };
+    sessions_dir().join(dir_name)
 }

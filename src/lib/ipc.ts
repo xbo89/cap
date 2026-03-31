@@ -21,6 +21,7 @@ export interface RecordingConfig {
   fps: number;
   capture_audio: boolean;
   capture_mic: boolean;
+  capture_mouse?: boolean;
   region?: CaptureRegion;
 }
 
@@ -228,6 +229,21 @@ export const ipc = {
   // Recording region border indicator
   showRegionBorder: (region: CaptureRegion) => invoke<void>("show_region_border", { region }),
   dismissRegionBorder: () => invoke<void>("dismiss_region_border"),
+
+  // Recording floating toolbar
+  showRecordingToolbar: (region: CaptureRegion) => invoke<void>("show_recording_toolbar", { region }),
+  dismissRecordingToolbar: () => invoke<void>("dismiss_recording_toolbar"),
+  cancelRecording: () => invoke<void>("cancel_recording"),
+
+  // Toolbar-initiated recording control (uses backend emit for cross-window communication)
+  toolbarStopRecording: () => invoke<void>("toolbar_stop_recording"),
+  toolbarCancelRecording: () => invoke<void>("toolbar_cancel_recording"),
+
+  // Open session in Finder
+  showInFinder: (sessionId: string) => invoke<void>("show_in_finder", { sessionId }),
+
+  // Sessions browser window
+  showSessionsBrowser: () => invoke<void>("show_sessions_browser"),
 
   // Session management
   listSessions: () => invoke<SessionInfo[]>("list_sessions"),

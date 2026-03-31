@@ -16,6 +16,8 @@ export default defineConfig(async () => ({
         main: resolve(__dirname, "index.html"),
         overlay: resolve(__dirname, "overlay.html"),
         "region-border": resolve(__dirname, "region-border.html"),
+        "recording-toolbar": resolve(__dirname, "recording-toolbar.html"),
+        "sessions-browser": resolve(__dirname, "sessions-browser.html"),
       },
     },
   },

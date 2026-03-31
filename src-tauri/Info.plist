@@ -1,0 +1,51 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<!-- Declare .capcap as a package type so Finder shows it as a single file -->
+	<key>UTExportedTypeDeclarations</key>
+	<array>
+		<dict>
+			<key>UTTypeIdentifier</key>
+			<string>com.master.screencap.project</string>
+			<key>UTTypeDescription</key>
+			<string>ScreenCap Project</string>
+			<key>UTTypeConformsTo</key>
+			<array>
+				<string>com.apple.package</string>
+				<string>public.data</string>
+			</array>
+			<key>UTTypeTagSpecification</key>
+			<dict>
+				<key>public.filename-extension</key>
+				<array>
+					<string>capcap</string>
+				</array>
+			</dict>
+			<key>UTTypeIconFile</key>
+			<string>capcap-doc.icns</string>
+		</dict>
+	</array>
+
+	<!-- Document types: associate .capcap with this app -->
+	<key>CFBundleDocumentTypes</key>
+	<array>
+		<dict>
+			<key>CFBundleTypeName</key>
+			<string>ScreenCap Project</string>
+			<key>CFBundleTypeRole</key>
+			<string>Editor</string>
+			<key>CFBundleTypeIconFile</key>
+			<string>capcap-doc.icns</string>
+			<key>LSItemContentTypes</key>
+			<array>
+				<string>com.master.screencap.project</string>
+			</array>
+			<key>LSTypeIsPackage</key>
+			<true/>
+			<key>LSHandlerRank</key>
+			<string>Owner</string>
+		</dict>
+	</array>
+</dict>
+</plist>

@@ -1,13 +1,15 @@
 import { useState, useEffect, useCallback } from "react";
+import { emit } from "@tauri-apps/api/event";
 import { ipc, type SessionInfo } from "@/lib/ipc";
-import { Trash2, GripVertical } from "lucide-react";
+import { Trash2, FolderOpen } from "lucide-react";
 
 interface SessionSidebarProps {
   currentSessionId?: string;
-  onOpenSession: (sessionId: string) => void;
+  onOpenSession?: (sessionId: string) => void;
+  standalone?: boolean;
 }
 
-export function SessionSidebar({ currentSessionId, onOpenSession }: SessionSidebarProps) {
+export function SessionSidebar({ currentSessionId, onOpenSession, standalone }: SessionSidebarProps) {
   const [sessions, setSessions] = useState<SessionInfo[]>([]);
   const [loading, setLoading] = useState(true);
   const [confirmDelete, setConfirmDelete] = useState<string | null>(null);
@@ -44,12 +46,6 @@ export function SessionSidebar({ currentSessionId, onOpenSession }: SessionSideb
     }
   }, []);
 
-  const handleDragStart = useCallback((e: React.DragEvent, session: SessionInfo) => {
-    e.dataTransfer.setData("application/x-session-id", session.session_id);
-    e.dataTransfer.setData("text/plain", session.session_id);
-    e.dataTransfer.effectAllowed = "copy";
-  }, []);
-
   const formatDate = (timestamp: string) => {
     const secs = parseInt(timestamp, 10);
     if (isNaN(secs) || secs === 0) return "Unknown";
@@ -66,7 +62,7 @@ export function SessionSidebar({ currentSessionId, onOpenSession }: SessionSideb
   };
 
   return (
-    <div className="w-64 border-r border-border flex flex-col bg-background">
+    <div className={`${standalone ? "w-full h-full" : "w-64 border-r border-border"} flex flex-col bg-background`}>
       <div className="px-3 py-2 border-b border-border">
         <h3 className="text-sm font-medium text-foreground">Recordings</h3>
         <p className="text-xs text-muted-foreground mt-0.5">{sessions.length} sessions</p>
@@ -90,18 +86,17 @@ export function SessionSidebar({ currentSessionId, onOpenSession }: SessionSideb
           return (
             <div
               key={session.session_id}
-              className={`group flex items-start gap-2 px-2 py-2 border-b border-border/50 hover:bg-accent/50 cursor-pointer ${
+              className={`group flex items-start gap-2 px-3 py-2 border-b border-border/50 hover:bg-accent/50 cursor-pointer ${
                 isCurrent ? "bg-accent" : ""
               }`}
-              draggable
-              onDragStart={(e) => handleDragStart(e, session)}
-              onClick={() => onOpenSession(session.session_id)}
+              onClick={() => {
+                if (onOpenSession) {
+                  onOpenSession(session.session_id);
+                } else {
+                  emit("open-session", { session_id: session.session_id });
+                }
+              }}
             >
-              {/* Drag handle */}
-              <div className="mt-1 text-muted-foreground/40 group-hover:text-muted-foreground cursor-grab">
-                <GripVertical className="h-3.5 w-3.5" />
-              </div>
-
               {/* Thumbnail */}
               <div className="w-16 h-10 rounded bg-muted flex-shrink-0 overflow-hidden">
                 {thumbUrl ? (
@@ -122,7 +117,14 @@ export function SessionSidebar({ currentSessionId, onOpenSession }: SessionSideb
               </div>
 
               {/* Actions */}
-              <div className="flex flex-col gap-0.5 opacity-0 group-hover:opacity-100 transition-opacity">
+              <div className="flex items-center gap-0.5 opacity-0 group-hover:opacity-100 transition-opacity">
+                <button
+                  className="p-1 text-muted-foreground hover:text-foreground hover:bg-accent rounded"
+                  onClick={(e) => { e.stopPropagation(); ipc.showInFinder(session.session_id); }}
+                  title="Open in Finder"
+                >
+                  <FolderOpen className="h-3 w-3" />
+                </button>
                 {confirmDelete === session.session_id ? (
                   <button
                     className="p-1 text-red-500 hover:bg-red-500/10 rounded text-[10px] font-medium"

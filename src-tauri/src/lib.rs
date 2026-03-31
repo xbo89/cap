@@ -8,6 +8,7 @@ use capture::screen::Recorder;
 use commands::AppState;
 use std::sync::{Arc, Mutex};
 use std::io::{Read as _, Seek as _, SeekFrom};
+use tauri::{Emitter, Manager};
 use tauri::http::Response;
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -23,6 +24,19 @@ pub fn run() {
         .setup(|app| {
             tray::setup_tray(app)?;
             Ok(())
+        })
+        .on_window_event(|window, event| {
+            // macOS: hide main window on close instead of quitting the app.
+            // The app stays alive in the system tray.
+            if let tauri::WindowEvent::CloseRequested { api, .. } = event {
+                let label = window.label();
+                if label == "main" {
+                    // Hide the main editor window, don't quit
+                    let _ = window.hide();
+                    api.prevent_close();
+                }
+                // Other windows (sessions_browser, etc.) close normally
+            }
         })
         .register_asynchronous_uri_scheme_protocol("stream", move |_ctx, request, responder| {
             // Custom protocol to serve local video files
@@ -178,7 +192,43 @@ pub fn run() {
             commands::list_sessions,
             commands::delete_session,
             commands::generate_thumbnail,
+            commands::show_recording_toolbar,
+            commands::dismiss_recording_toolbar,
+            commands::cancel_recording,
+            commands::toolbar_stop_recording,
+            commands::toolbar_cancel_recording,
+            commands::show_sessions_browser,
+            commands::show_in_finder,
         ])
-        .run(tauri::generate_context!())
-        .expect("error while running tauri application");
+        .build(tauri::generate_context!())
+        .expect("error while building tauri application")
+        .run(|app, event| {
+            if let tauri::RunEvent::Opened { urls } = event {
+                for url in urls {
+                    // Handle .capcap bundle directories opened from Finder
+                    if let Ok(path) = url.to_file_path() {
+                        if path.extension().and_then(|e| e.to_str()) == Some("capcap") {
+                            // The .capcap IS the session directory (bundle format)
+                            let video_path = path.join("video.mp4");
+                            if video_path.exists() {
+                                // Extract session ID from directory name
+                                let session_id = path.file_stem()
+                                    .unwrap_or_default()
+                                    .to_string_lossy()
+                                    .to_string();
+                                let session_path = path.to_string_lossy().to_string();
+                                let _ = app.emit("capcap-opened", serde_json::json!({
+                                    "session_id": session_id,
+                                    "session_path": session_path,
+                                }));
+                                if let Some(window) = app.get_webview_window("main") {
+                                    let _ = window.show();
+                                    let _ = window.set_focus();
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        });
 }

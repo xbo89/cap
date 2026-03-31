@@ -46,47 +46,35 @@ impl Recorder {
         }
 
         let session_id = SessionId::new();
-        let session_dir = super::sessions_dir().join(&session_id.0);
+        let session_dir = super::session_dir(&session_id.0);
         std::fs::create_dir_all(&session_dir).map_err(|e| e.to_string())?;
 
         let video_path = session_dir.join("video.mp4");
         let fps = if config.fps > 30 { 30 } else { config.fps };
 
-        // Write ScreenCaptureKit-based Swift recorder
-        let region = config.region.as_ref().map(|r| (r.x, r.y, r.width, r.height));
-        let swift_src = build_swift_recorder(
-            video_path.to_str().unwrap(),
-            session_dir.join("recording.flag").to_str().unwrap(),
-            fps,
-            region,
-        );
+        // Ensure cached Swift recorder binary exists
+        let compiled_path = ensure_cached_recorder()?;
 
-        let swift_path = session_dir.join("record.swift");
-        std::fs::write(&swift_path, &swift_src).map_err(|e| e.to_string())?;
-
-        // Compile
-        let compiled_path = session_dir.join("recorder");
-        let compile = Command::new("swiftc")
-            .args([
-                "-framework", "Cocoa",
-                "-framework", "AVFoundation",
-                "-framework", "CoreMedia",
-                "-framework", "ScreenCaptureKit",
-                "-o", compiled_path.to_str().unwrap(),
-                swift_path.to_str().unwrap(),
-            ])
-            .output()
-            .map_err(|e| format!("swiftc failed: {}", e))?;
-
-        if !compile.status.success() {
-            return Err(format!(
-                "Swift compile error: {}",
-                String::from_utf8_lossy(&compile.stderr)
-            ));
-        }
+        // Write runtime config JSON for the recorder
+        let region = config.region.as_ref().map(|r| {
+            serde_json::json!({
+                "x": r.x, "y": r.y, "width": r.width, "height": r.height
+            })
+        });
+        let runtime_config = serde_json::json!({
+            "video_path": video_path.to_str().unwrap(),
+            "session_dir": session_dir.to_str().unwrap(),
+            "fps": fps,
+            "shows_cursor": config.capture_mouse,
+            "region": region,
+        });
+        let config_path = session_dir.join("recorder_config.json");
+        std::fs::write(&config_path, serde_json::to_string(&runtime_config).unwrap())
+            .map_err(|e| e.to_string())?;
 
         // Run — stderr inherits to avoid pipe buffer blocking the recorder
         let child = Command::new(compiled_path.to_str().unwrap())
+            .arg(config_path.to_str().unwrap())
             .stdout(std::process::Stdio::null())
             .stderr(std::process::Stdio::inherit())
             .spawn()
@@ -229,30 +217,114 @@ impl Recorder {
     pub fn elapsed_secs(&self) -> f64 {
         self.start_time.map(|t| t.elapsed().as_secs_f64()).unwrap_or(0.0)
     }
+
+    pub fn session_dir(&self) -> Option<&std::path::Path> {
+        self.session_dir.as_deref()
+    }
 }
 
 mod libc_ffi {
     extern "C" { pub fn kill(pid: i32, sig: i32) -> i32; }
 }
 
-fn build_swift_recorder(
-    video_path: &str,
-    ready_flag: &str,
-    fps: u32,
-    region: Option<(f64, f64, f64, f64)>,
-) -> String {
-    let ready = std::path::Path::new(ready_flag);
-    let stop_flag_str = ready.parent().unwrap().join("stop.flag");
-    let done_flag_str = ready.parent().unwrap().join("done.flag");
-    let stop_flag = stop_flag_str.to_str().unwrap();
-    let done_flag = done_flag_str.to_str().unwrap();
+/// Ensure the cached Swift recorder binary is compiled and return its path.
+/// The binary is compiled once and reused for all recordings.
+fn ensure_cached_recorder() -> Result<PathBuf, String> {
+    let cache_dir = super::sessions_dir().parent().unwrap().join("cache");
+    std::fs::create_dir_all(&cache_dir).map_err(|e| e.to_string())?;
 
-    format!(
-        r#"import Cocoa
+    let compiled_path = cache_dir.join("recorder");
+    let swift_path = cache_dir.join("recorder.swift");
+    let swift_src = build_swift_recorder();
+
+    // Check if cached binary is up to date (compare source hash)
+    let hash_path = cache_dir.join("recorder.hash");
+    let current_hash = format!("{:x}", md5_hash(swift_src.as_bytes()));
+    let cached_hash = std::fs::read_to_string(&hash_path).unwrap_or_default();
+
+    if compiled_path.exists() && current_hash == cached_hash.trim() {
+        return Ok(compiled_path);
+    }
+
+    // Need to (re)compile
+    std::fs::write(&swift_path, &swift_src).map_err(|e| e.to_string())?;
+
+    let compile = Command::new("swiftc")
+        .args([
+            "-O",
+            "-framework", "Cocoa",
+            "-framework", "AVFoundation",
+            "-framework", "CoreMedia",
+            "-framework", "ScreenCaptureKit",
+            "-o", compiled_path.to_str().unwrap(),
+            swift_path.to_str().unwrap(),
+        ])
+        .output()
+        .map_err(|e| format!("swiftc failed: {}", e))?;
+
+    if !compile.status.success() {
+        return Err(format!(
+            "Swift compile error: {}",
+            String::from_utf8_lossy(&compile.stderr)
+        ));
+    }
+
+    // Save hash
+    let _ = std::fs::write(&hash_path, &current_hash);
+
+    Ok(compiled_path)
+}
+
+/// Simple hash for cache invalidation
+fn md5_hash(data: &[u8]) -> u64 {
+    let mut h: u64 = 0xcbf29ce484222325;
+    for &b in data {
+        h ^= b as u64;
+        h = h.wrapping_mul(0x100000001b3);
+    }
+    h
+}
+
+fn build_swift_recorder() -> String {
+    // The Swift recorder now reads config from a JSON file passed as argv[1].
+    // This allows the binary to be compiled once and reused across recordings.
+    r#"import Cocoa
 import AVFoundation
 import ScreenCaptureKit
+import Foundation
 
-class Recorder: NSObject, SCStreamOutput {{
+struct RecorderConfig: Codable {
+    let video_path: String
+    let session_dir: String
+    let fps: Int
+    let shows_cursor: Bool
+    let region: Region?
+
+    struct Region: Codable {
+        let x: Double
+        let y: Double
+        let width: Double
+        let height: Double
+    }
+}
+
+// Read config from argv[1]
+guard CommandLine.arguments.count > 1 else {
+    fputs("Usage: recorder <config.json>\n", stderr)
+    exit(1)
+}
+let configPath = CommandLine.arguments[1]
+guard let configData = FileManager.default.contents(atPath: configPath),
+      let cfg = try? JSONDecoder().decode(RecorderConfig.self, from: configData) else {
+    fputs("ERROR: Failed to read config from \(configPath)\n", stderr)
+    exit(1)
+}
+
+let readyFlag = cfg.session_dir + "/recording.flag"
+let stopFlag = cfg.session_dir + "/stop.flag"
+let doneFlag = cfg.session_dir + "/done.flag"
+
+class Recorder: NSObject, SCStreamOutput {
     var stream: SCStream?
     var writer: AVAssetWriter?
     var videoInput: AVAssetWriterInput?
@@ -263,234 +335,198 @@ class Recorder: NSObject, SCStreamOutput {{
     let outputURL: URL
     var stopping = false
 
-    init(outputPath: String) {{
+    init(outputPath: String) {
         self.outputURL = URL(fileURLWithPath: outputPath)
         super.init()
-    }}
+    }
 
-    func start() async throws {{
+    func start(config cfg: RecorderConfig) async throws {
         let content = try await SCShareableContent.excludingDesktopWindows(false, onScreenWindowsOnly: true)
-        guard !content.displays.isEmpty else {{
+        guard !content.displays.isEmpty else {
             fputs("ERROR: No display found\n", stderr)
             exit(1)
-        }}
+        }
 
-        // Find the display that contains the capture region (if specified),
-        // otherwise use the first display.
         var display = content.displays[0]
-        {display_selection_code}
+
+        // If region specified, find the display containing the region center
+        if let region = cfg.region {
+            let regionCenter = CGPoint(x: region.x + region.width / 2, y: region.y + region.height / 2)
+            for d in content.displays {
+                let frame = CGDisplayBounds(d.displayID)
+                if frame.contains(regionCenter) {
+                    display = d
+                    break
+                }
+            }
+        }
 
         let filter = SCContentFilter(display: display, excludingWindows: [])
-        let config = SCStreamConfiguration()
-        {region_code}
-        config.minimumFrameInterval = CMTime(value: 1, timescale: {fps})
-        config.pixelFormat = kCVPixelFormatType_32BGRA
-        config.showsCursor = true
+        let streamConfig = SCStreamConfiguration()
+
+        if let region = cfg.region {
+            let displayBounds = CGDisplayBounds(display.displayID)
+            streamConfig.sourceRect = CGRect(
+                x: region.x - displayBounds.origin.x,
+                y: region.y - displayBounds.origin.y,
+                width: region.width,
+                height: region.height
+            )
+            streamConfig.width = Int(region.width) * 2
+            streamConfig.height = Int(region.height) * 2
+        } else {
+            streamConfig.width = display.width * 2
+            streamConfig.height = display.height * 2
+        }
+
+        streamConfig.minimumFrameInterval = CMTime(value: 1, timescale: CMTimeScale(cfg.fps))
+        streamConfig.pixelFormat = kCVPixelFormatType_32BGRA
+        streamConfig.showsCursor = cfg.shows_cursor
 
         try? FileManager.default.removeItem(at: outputURL)
         writer = try AVAssetWriter(outputURL: outputURL, fileType: .mp4)
 
         let settings: [String: Any] = [
             AVVideoCodecKey: AVVideoCodecType.h264,
-            AVVideoWidthKey: config.width,
-            AVVideoHeightKey: config.height,
+            AVVideoWidthKey: streamConfig.width,
+            AVVideoHeightKey: streamConfig.height,
             AVVideoCompressionPropertiesKey: [AVVideoAverageBitRateKey: 8_000_000]
         ]
         videoInput = AVAssetWriterInput(mediaType: .video, outputSettings: settings)
         videoInput?.expectsMediaDataInRealTime = true
 
-        // Use pixel buffer adaptor for proper format handling with ScreenCaptureKit
         adaptor = AVAssetWriterInputPixelBufferAdaptor(
             assetWriterInput: videoInput!,
             sourcePixelBufferAttributes: [
                 kCVPixelBufferPixelFormatTypeKey as String: kCVPixelFormatType_32BGRA,
-                kCVPixelBufferWidthKey as String: config.width,
-                kCVPixelBufferHeightKey as String: config.height,
+                kCVPixelBufferWidthKey as String: streamConfig.width,
+                kCVPixelBufferHeightKey as String: streamConfig.height,
             ]
         )
 
         writer?.add(videoInput!)
         writer?.startWriting()
 
-        if writer?.status == .failed {{
+        if writer?.status == .failed {
             fputs("ERROR: AVAssetWriter failed: \(writer?.error?.localizedDescription ?? "unknown")\n", stderr)
             exit(1)
-        }}
+        }
 
-        stream = SCStream(filter: filter, configuration: config, delegate: nil)
+        stream = SCStream(filter: filter, configuration: streamConfig, delegate: nil)
         try stream?.addStreamOutput(self, type: .screen, sampleHandlerQueue: .global())
         try await stream?.startCapture()
 
-        FileManager.default.createFile(atPath: "{ready_flag}", contents: nil)
-        fputs("Recording started (display: \(display.width)x\(display.height), fps: {fps})\n", stderr)
-    }}
+        FileManager.default.createFile(atPath: readyFlag, contents: nil)
+        fputs("Recording started (display: \(display.width)x\(display.height), fps: \(cfg.fps))\n", stderr)
+    }
 
-    func stream(_ s: SCStream, didOutputSampleBuffer buf: CMSampleBuffer, of type: SCStreamOutputType) {{
-        guard type == .screen, !stopping else {{ return }}
-        guard buf.isValid else {{ return }}
-        guard let videoInput = videoInput, videoInput.isReadyForMoreMediaData else {{ return }}
-        guard let w = writer, w.status == .writing else {{ return }}
+    func stream(_ s: SCStream, didOutputSampleBuffer buf: CMSampleBuffer, of type: SCStreamOutputType) {
+        guard type == .screen, !stopping else { return }
+        guard buf.isValid else { return }
+        guard let videoInput = videoInput, videoInput.isReadyForMoreMediaData else { return }
+        guard let w = writer, w.status == .writing else { return }
 
-        // Get the pixel buffer from the sample buffer
-        guard let pixelBuffer = CMSampleBufferGetImageBuffer(buf) else {{ return }}
+        guard let pixelBuffer = CMSampleBufferGetImageBuffer(buf) else { return }
         let pts = CMSampleBufferGetPresentationTimeStamp(buf)
 
-        if !sessionStarted {{
+        if !sessionStarted {
             w.startSession(atSourceTime: pts)
             sessionStarted = true
-        }}
+        }
 
-        if let adaptor = adaptor {{
-            if !adaptor.append(pixelBuffer, withPresentationTime: pts) {{
-                if !errorLogged {{
+        if let adaptor = adaptor {
+            if !adaptor.append(pixelBuffer, withPresentationTime: pts) {
+                if !errorLogged {
                     fputs("ERROR: Adaptor append failed. Writer status: \(w.status.rawValue) error: \(w.error?.localizedDescription ?? "none")\n", stderr)
-                    let dims = CVPixelBufferGetWidth(pixelBuffer)
-                    let height = CVPixelBufferGetHeight(pixelBuffer)
-                    let fmt = CVPixelBufferGetPixelFormatType(pixelBuffer)
-                    fputs("  PixelBuffer: \(dims)x\(height) format=\(fmt) pts=\(pts.seconds)s\n", stderr)
                     errorLogged = true
-                }}
+                }
                 return
-            }}
-        }} else {{
-            if !videoInput.append(buf) {{ return }}
-        }}
+            }
+        } else {
+            if !videoInput.append(buf) { return }
+        }
         frameCount += 1
-    }}
+    }
 
-    /// Synchronous stop using RunLoop pumping to ensure completion handlers fire.
-    func stopSync() {{
+    func stopSync() {
         fputs("Stopping capture (frames: \(frameCount))...\n", stderr)
 
-        // Step 1: Stop capture FIRST and wait for completion.
-        // After stopCapture completes, no more didOutputSampleBuffer callbacks will fire.
-        if let s = stream {{
+        if let s = stream {
             var captureStopped = false
-            s.stopCapture {{ error in
-                if let error = error {{
+            s.stopCapture { error in
+                if let error = error {
                     fputs("Warning: stopCapture: \(error)\n", stderr)
-                }}
+                }
                 captureStopped = true
-            }}
-            while !captureStopped {{
+            }
+            while !captureStopped {
                 RunLoop.current.run(mode: .default, before: Date(timeIntervalSinceNow: 0.05))
-            }}
+            }
             stream = nil
-            fputs("Capture stopped. No more callbacks.\n", stderr)
-        }}
+        }
 
-        // Step 2: NOW it's safe to set stopping and mark finished.
-        // No more append calls can happen since capture is stopped.
         stopping = true
-        Thread.sleep(forTimeInterval: 0.1) // Extra safety: let any in-flight .global() callbacks drain
+        Thread.sleep(forTimeInterval: 0.1)
 
-        fputs("Writer status before markAsFinished: \(writer?.status.rawValue ?? -1)\n", stderr)
         videoInput?.markAsFinished()
-        fputs("Writer status after markAsFinished: \(writer?.status.rawValue ?? -1) error: \(writer?.error?.localizedDescription ?? "none")\n", stderr)
 
-        guard let w = writer, w.status == .writing else {{
-            fputs("ERROR: Writer not in writing state: \(writer?.status.rawValue ?? -1) error: \(writer?.error?.localizedDescription ?? "none")\n", stderr)
+        guard let w = writer, w.status == .writing else {
+            fputs("ERROR: Writer not in writing state\n", stderr)
             return
-        }}
+        }
 
-        // Step 3: Finish writing synchronously
         var writingDone = false
-        w.finishWriting {{
+        w.finishWriting {
             writingDone = true
-        }}
-        while !writingDone {{
+        }
+        while !writingDone {
             RunLoop.current.run(mode: .default, before: Date(timeIntervalSinceNow: 0.05))
-        }}
+        }
 
-        fputs("finishWriting done. Status: \(w.status.rawValue) error: \(w.error?.localizedDescription ?? "none")\n", stderr)
-
-        if w.status == .completed {{
+        if w.status == .completed {
             fputs("Video finalized OK. Frames: \(frameCount)\n", stderr)
-            // Flush file to disk
             let fd = open(outputURL.path, O_WRONLY)
-            if fd >= 0 {{
+            if fd >= 0 {
                 fsync(fd)
                 close(fd)
-            }}
-        }}
-    }}
-}}
+            }
+        }
+    }
+}
 
-let rec = Recorder(outputPath: "{video_path}")
+let rec = Recorder(outputPath: cfg.video_path)
 
-// Handle SIGTERM: create stop flag as fallback
-signal(SIGTERM) {{ _ in
-    FileManager.default.createFile(atPath: "{stop_flag}", contents: nil)
-}}
+signal(SIGTERM) { _ in
+    FileManager.default.createFile(atPath: stopFlag, contents: nil)
+}
 
-// Start recording
-Task {{
-    do {{
-        try await rec.start()
-    }} catch {{
+Task {
+    do {
+        try await rec.start(config: cfg)
+    } catch {
         fputs("Start error: \(error)\n", stderr)
         exit(1)
-    }}
-}}
+    }
+}
 
-// Poll for stop flag on a timer (runs on the main RunLoop)
-Timer.scheduledTimer(withTimeInterval: 0.2, repeats: true) {{ timer in
-    guard FileManager.default.fileExists(atPath: "{stop_flag}") else {{ return }}
+Timer.scheduledTimer(withTimeInterval: 0.2, repeats: true) { timer in
+    guard FileManager.default.fileExists(atPath: stopFlag) else { return }
     timer.invalidate()
 
     rec.stopSync()
 
-    // Write diagnostic info
     let statusMsg = "frames=\(rec.frameCount) writer_status=\(rec.writer?.status.rawValue ?? -1) file_size=\(try? FileManager.default.attributesOfItem(atPath: rec.outputURL.path)[.size] ?? 0)"
     fputs("Status: \(statusMsg)\n", stderr)
 
-    FileManager.default.createFile(atPath: "{done_flag}", contents: statusMsg.data(using: .utf8))
+    FileManager.default.createFile(atPath: doneFlag, contents: statusMsg.data(using: .utf8))
     fputs("Done flag created, exiting.\n", stderr)
-    // Brief delay then exit
-    DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) {{
+    DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) {
         exit(0)
-    }}
-}}
+    }
+}
 
 RunLoop.current.run()
-"#,
-        video_path = video_path.replace('\\', "\\\\").replace('"', "\\\""),
-        ready_flag = ready_flag.replace('\\', "\\\\").replace('"', "\\\""),
-        stop_flag = stop_flag.replace('\\', "\\\\").replace('"', "\\\""),
-        done_flag = done_flag.replace('\\', "\\\\").replace('"', "\\\""),
-        fps = fps,
-        display_selection_code = if let Some((x, y, w, h)) = region {
-            // Pick the display whose frame contains the center of the region
-            format!(
-                r#"let regionCenter = CGPoint(x: {cx}, y: {cy})
-        for d in content.displays {{
-            let frame = CGDisplayBounds(d.displayID)
-            if frame.contains(regionCenter) {{
-                display = d
-                break
-            }}
-        }}"#,
-                cx = x + w / 2.0,
-                cy = y + h / 2.0,
-            )
-        } else {
-            String::new()
-        },
-        region_code = if let Some((x, y, w, h)) = region {
-            // Region capture: sourceRect is display-relative, so subtract display origin.
-            // Global region coords are converted to display-local coords in Swift.
-            format!(
-                r#"let displayBounds = CGDisplayBounds(display.displayID)
-        config.sourceRect = CGRect(x: {x} - displayBounds.origin.x, y: {y} - displayBounds.origin.y, width: {w}, height: {h})
-        config.width = Int({w}) * 2
-        config.height = Int({h}) * 2"#,
-                x = x, y = y, w = w, h = h
-            )
-        } else {
-            // Full display capture
-            "config.width = display.width * 2\n        config.height = display.height * 2".to_string()
-        },
-    )
+"#.to_string()
 }
 
 #[cfg(target_os = "macos")]

@@ -21,6 +21,8 @@
         "decorations": true,
         "transparent": false,
         "titleBarStyle": "Overlay",
+        "hiddenTitle": true,
+        "trafficLightPosition": { "x": 13, "y": 9 },
         "visible": false
       }
     ],
@@ -37,6 +39,24 @@
       "icons/128x128@2x.png",
       "icons/icon.icns",
       "icons/icon.ico"
-    ]
+    ],
+    "fileAssociations": [
+      {
+        "ext": ["capcap"],
+        "name": "ScreenCap Project",
+        "description": "ScreenCap Project",
+        "role": "Editor",
+        "mimeType": "application/x-capcap",
+        "exportedType": {
+          "identifier": "com.master.screencap.project",
+          "conformsTo": ["com.apple.package"]
+        }
+      }
+    ],
+    "macOS": {
+      "files": {
+        "Resources/capcap-doc.icns": "icons/capcap-doc.icns"
+      }
+    }
   }
 }

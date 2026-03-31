@@ -31,6 +31,7 @@ export function RegionSelector() {
   const [region, setRegion] = useState<Rect | null>(null);
   const [drag, setDrag] = useState<DragMode>(null);
   const [cursor, setCursor] = useState("crosshair");
+  const [startingRecording, setStartingRecording] = useState(false);
   const containerRef = useRef<HTMLDivElement>(null);
   const monitorOffset = useRef(getMonitorOffset());
 
@@ -71,6 +72,7 @@ export function RegionSelector() {
 
   const handleMouseDown = useCallback(
     (e: React.MouseEvent) => {
+      if (startingRecording) return;
       const mx = e.clientX;
       const my = e.clientY;
 
@@ -91,7 +93,7 @@ export function RegionSelector() {
       setRegion(null);
       setDrag({ type: "draw", startX: mx, startY: my });
     },
-    [region, hitTestHandle]
+    [region, hitTestHandle, startingRecording]
   );
 
   const handleMouseMove = useCallback(
@@ -159,16 +161,22 @@ export function RegionSelector() {
     setDrag(null);
   }, []);
 
-  // Build clip-path for the darkened overlay (everything except the region)
+  // When starting recording, hide all visuals immediately
+  if (startingRecording) {
+    return <div className="fixed inset-0" style={{ background: "transparent" }} />;
+  }
+
+  // Build clip-path for the darkened overlay (everything except the region).
+  // Expand cutout by 1px to prevent sub-pixel dark seams at edges.
   const maskStyle: React.CSSProperties = region
     ? {
         clipPath: `polygon(
           0% 0%, 100% 0%, 100% 100%, 0% 100%, 0% 0%,
-          ${region.x}px ${region.y}px,
-          ${region.x}px ${region.y + region.h}px,
-          ${region.x + region.w}px ${region.y + region.h}px,
-          ${region.x + region.w}px ${region.y}px,
-          ${region.x}px ${region.y}px
+          ${region.x - 1}px ${region.y - 1}px,
+          ${region.x - 1}px ${region.y + region.h + 1}px,
+          ${region.x + region.w + 1}px ${region.y + region.h + 1}px,
+          ${region.x + region.w + 1}px ${region.y - 1}px,
+          ${region.x - 1}px ${region.y - 1}px
         )`,
         clipRule: "evenodd",
       }
@@ -200,15 +208,14 @@ export function RegionSelector() {
       <div
         className="absolute inset-0 bg-black/40"
         style={maskStyle}
-        // pointer-events: none so clicks pass through to the container
       />
 
       {/* Prompt text when no region drawn */}
       {!region && !drag && (
         <div className="absolute inset-0 flex items-center justify-center pointer-events-none">
-          <div className="text-white/80 text-lg font-medium bg-black/50 px-6 py-3 rounded-xl backdrop-blur-sm">
+          <span className="text-white/80 text-lg font-medium drop-shadow-lg pointer-events-none">
             Drag to select recording area &middot; Esc to cancel
-          </div>
+          </span>
         </div>
       )}
 
@@ -216,12 +223,14 @@ export function RegionSelector() {
       {region && region.w > 2 && region.h > 2 && (
         <>
           <div
-            className="absolute border-2 border-white/90 rounded-sm pointer-events-none"
+            className="absolute rounded-sm pointer-events-none"
             style={{
               left: region.x,
               top: region.y,
               width: region.w,
               height: region.h,
+              outline: "2px solid rgba(255, 255, 255, 0.9)",
+              outlineOffset: "0px",
             }}
           />
 
@@ -252,7 +261,11 @@ export function RegionSelector() {
 
           {/* Toolbar below region */}
           {!drag && (
-            <OverlayToolbar region={region} monitorOffset={monitorOffset.current} />
+            <OverlayToolbar
+              region={region}
+              monitorOffset={monitorOffset.current}
+              onRecordingStart={() => setStartingRecording(true)}
+            />
           )}
         </>
       )}

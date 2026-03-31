@@ -44,13 +44,14 @@ pub fn start_recording(
     config: RecordingConfig,
     state: State<'_, AppState>,
 ) -> Result<SessionId, String> {
-    // Show region border indicator if recording a specific region
-    let region_for_border = config.region.clone();
+    // Show region border indicator and floating toolbar if recording a specific region
+    let region_for_ui = config.region.clone();
     let mut recorder = state.recorder.lock().map_err(|e| e.to_string())?;
     let session_id = recorder.start(config)?;
 
-    if let Some(region) = region_for_border {
-        let _ = show_region_border(app, region);
+    if let Some(region) = region_for_ui {
+        let _ = show_region_border(app.clone(), region.clone());
+        let _ = show_recording_toolbar(app, region);
     }
 
     Ok(session_id)
@@ -64,8 +65,9 @@ pub fn stop_recording(
     let mut recorder = state.recorder.lock().map_err(|e| e.to_string())?;
     let summary = recorder.stop()?;
 
-    // Dismiss region border if it exists
-    let _ = dismiss_region_border(app);
+    // Dismiss region border and toolbar if they exist
+    let _ = dismiss_region_border(app.clone());
+    let _ = dismiss_recording_toolbar(app);
 
     Ok(summary)
 }
@@ -81,8 +83,7 @@ pub fn get_recording_status(state: State<'_, AppState>) -> Result<RecordingStatu
 
 #[tauri::command]
 pub fn get_mouse_metadata(session_id: String) -> Result<Vec<MouseEvent>, String> {
-    let metadata_path = crate::capture::sessions_dir()
-        .join(&session_id)
+    let metadata_path = crate::capture::session_dir(&session_id)
         .join("metadata.json");
     let data = std::fs::read_to_string(&metadata_path).map_err(|e| e.to_string())?;
     serde_json::from_str(&data).map_err(|e| e.to_string())
@@ -90,8 +91,7 @@ pub fn get_mouse_metadata(session_id: String) -> Result<Vec<MouseEvent>, String>
 
 #[tauri::command]
 pub fn get_capture_region(session_id: String) -> Result<Option<crate::capture::CaptureRegion>, String> {
-    let region_path = crate::capture::sessions_dir()
-        .join(&session_id)
+    let region_path = crate::capture::session_dir(&session_id)
         .join("region.json");
     if !region_path.exists() {
         return Ok(None);
@@ -103,8 +103,7 @@ pub fn get_capture_region(session_id: String) -> Result<Option<crate::capture::C
 
 #[tauri::command]
 pub fn get_waveform(session_id: String, samples_per_sec: u32) -> Result<Vec<f32>, String> {
-    let video_path = crate::capture::sessions_dir()
-        .join(&session_id)
+    let video_path = crate::capture::session_dir(&session_id)
         .join("video.mp4");
     let sps = if samples_per_sec == 0 { 100 } else { samples_per_sec };
     audio::extract_waveform(&video_path, sps)
@@ -112,16 +111,14 @@ pub fn get_waveform(session_id: String, samples_per_sec: u32) -> Result<Vec<f32>
 
 #[tauri::command]
 pub fn get_video_duration(session_id: String) -> Result<f64, String> {
-    let video_path = crate::capture::sessions_dir()
-        .join(&session_id)
+    let video_path = crate::capture::session_dir(&session_id)
         .join("video.mp4");
     audio::get_video_duration(&video_path)
 }
 
 #[tauri::command]
 pub fn save_project(session_id: String, project: Project) -> Result<(), String> {
-    let project_path = crate::capture::sessions_dir()
-        .join(&session_id)
+    let project_path = crate::capture::session_dir(&session_id)
         .join("project.json");
     let json = serde_json::to_string_pretty(&project).map_err(|e| e.to_string())?;
     std::fs::write(&project_path, json).map_err(|e| e.to_string())
@@ -129,8 +126,7 @@ pub fn save_project(session_id: String, project: Project) -> Result<(), String> 
 
 #[tauri::command]
 pub fn load_project(session_id: String) -> Result<Option<Project>, String> {
-    let project_path = crate::capture::sessions_dir()
-        .join(&session_id)
+    let project_path = crate::capture::session_dir(&session_id)
         .join("project.json");
     if !project_path.exists() {
         return Ok(None);
@@ -142,8 +138,7 @@ pub fn load_project(session_id: String) -> Result<Option<Project>, String> {
 
 #[tauri::command]
 pub fn get_video_info(session_id: String) -> Result<VideoInfo, String> {
-    let video_path = crate::capture::sessions_dir()
-        .join(&session_id)
+    let video_path = crate::capture::session_dir(&session_id)
         .join("video.mp4");
 
     // Use ffprobe to get width, height, fps
@@ -194,7 +189,7 @@ pub fn start_export(
     *state.export_cancel.lock().unwrap() = false;
     let cancel = state.export_cancel.clone();
 
-    let session_dir = crate::capture::sessions_dir().join(&session_id);
+    let session_dir = crate::capture::session_dir(&session_id);
 
     // Load mouse events
     let metadata_path = session_dir.join("metadata.json");
@@ -393,7 +388,8 @@ pub fn show_region_selector(app: AppHandle) -> Result<Vec<MonitorInfo>, String> 
         .always_on_top(true)
         .resizable(false)
         .skip_taskbar(true)
-        .focused(true);
+        .focused(true)
+        .accept_first_mouse(true);
 
         builder.build().map_err(|e| format!("Failed to create overlay: {}", e))?;
 
@@ -428,21 +424,85 @@ pub fn dismiss_region_selector(app: AppHandle) -> Result<(), String> {
 pub fn show_region_border(app: AppHandle, region: CaptureRegion) -> Result<(), String> {
     use tauri::WebviewWindowBuilder;
 
-    // Close any existing border window
+    // Close any existing border windows
     let _ = dismiss_region_border(app.clone());
 
-    // Create a small borderless transparent window positioned exactly at the region
-    // with a colored border to indicate the recording area.
-    // Add a few pixels of padding for the border itself.
-    let padding = 3.0;
+    // Create one full-screen transparent overlay per monitor (same pattern as region selector)
+    // to show dark overlay outside + white border around the recording region.
+    let monitors = app.available_monitors().map_err(|e| e.to_string())?;
+
+    for (i, monitor) in monitors.iter().enumerate() {
+        let pos = monitor.position();
+        let size = monitor.size();
+        let scale = monitor.scale_factor();
+
+        let label = format!("region_border_{}", i);
+        let logical_w = size.width as f64 / scale;
+        let logical_h = size.height as f64 / scale;
+        let logical_x = pos.x as f64 / scale;
+        let logical_y = pos.y as f64 / scale;
+
+        let url = format!(
+            "/region-border.html?x={}&y={}&w={}&h={}&monitorX={}&monitorY={}",
+            region.x, region.y, region.width, region.height, logical_x, logical_y
+        );
+
+        let builder = WebviewWindowBuilder::new(
+            &app,
+            &label,
+            tauri::WebviewUrl::App(url.into()),
+        )
+        .title("")
+        .inner_size(logical_w, logical_h)
+        .position(logical_x, logical_y)
+        .decorations(false)
+        .transparent(true)
+        .always_on_top(true)
+        .resizable(false)
+        .skip_taskbar(true)
+        .focused(false);
+
+        let window = builder.build().map_err(|e| format!("Failed to create border window: {}", e))?;
+        let _ = window.set_ignore_cursor_events(true);
+    }
+
+    Ok(())
+}
+
+#[tauri::command]
+pub fn dismiss_region_border(app: AppHandle) -> Result<(), String> {
+    for i in 0..16 {
+        let label = format!("region_border_{}", i);
+        if let Some(window) = app.get_webview_window(&label) {
+            let _ = window.close();
+        }
+    }
+    Ok(())
+}
+
+// --- Recording floating toolbar ---
+
+#[tauri::command]
+pub fn show_recording_toolbar(app: AppHandle, region: CaptureRegion) -> Result<(), String> {
+    use tauri::WebviewWindowBuilder;
+
+    // Close any existing toolbar window
+    let _ = dismiss_recording_toolbar(app.clone());
+
+    let toolbar_w = 280.0;
+    let toolbar_h = 48.0;
+    // Position centered below the recording region
+    let pos_x = region.x + region.width / 2.0 - toolbar_w / 2.0;
+    let pos_y = region.y + region.height + 20.0;
+
     let builder = WebviewWindowBuilder::new(
         &app,
-        "region_border",
-        tauri::WebviewUrl::App("/region-border.html".into()),
+        "recording_toolbar",
+        tauri::WebviewUrl::App("/recording-toolbar.html".into()),
     )
     .title("")
-    .inner_size(region.width + padding * 2.0, region.height + padding * 2.0)
-    .position(region.x - padding, region.y - padding)
+    .inner_size(toolbar_w, toolbar_h)
+    .position(pos_x, pos_y)
     .decorations(false)
     .transparent(true)
     .always_on_top(true)
@@ -450,18 +510,138 @@ pub fn show_region_border(app: AppHandle, region: CaptureRegion) -> Result<(), S
     .skip_taskbar(true)
     .focused(false);
 
-    // This window should not be interactable — clicks pass through
-    let window = builder.build().map_err(|e| format!("Failed to create border window: {}", e))?;
-    let _ = window.set_ignore_cursor_events(true);
+    builder.build().map_err(|e| format!("Failed to create toolbar window: {}", e))?;
 
     Ok(())
 }
 
 #[tauri::command]
-pub fn dismiss_region_border(app: AppHandle) -> Result<(), String> {
-    if let Some(window) = app.get_webview_window("region_border") {
+pub fn dismiss_recording_toolbar(app: AppHandle) -> Result<(), String> {
+    if let Some(window) = app.get_webview_window("recording_toolbar") {
         let _ = window.close();
     }
+    Ok(())
+}
+
+#[tauri::command]
+pub fn cancel_recording(
+    app: AppHandle,
+    state: State<'_, AppState>,
+) -> Result<(), String> {
+    let mut recorder = state.recorder.lock().map_err(|e| e.to_string())?;
+    let session_dir = recorder.session_dir().map(|p| p.to_path_buf());
+    let _ = recorder.stop();
+
+    // Clean up UI
+    let _ = dismiss_region_border(app.clone());
+    let _ = dismiss_recording_toolbar(app);
+
+    // Delete the session directory since this is a cancellation
+    if let Some(dir) = session_dir {
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    Ok(())
+}
+
+// --- Toolbar-initiated recording control ---
+// These commands are called from the floating toolbar window.
+// They handle the full workflow and emit events to the main window,
+// because frontend emit() doesn't reliably cross window boundaries.
+
+#[tauri::command]
+pub fn toolbar_stop_recording(
+    app: AppHandle,
+    state: State<'_, AppState>,
+) -> Result<(), String> {
+    let mut recorder = state.recorder.lock().map_err(|e| e.to_string())?;
+    let summary = recorder.stop()?;
+
+    // Emit FIRST, before closing any windows — closing the toolbar window
+    // (which initiated this command) can disrupt Tauri's event delivery.
+    let _ = app.emit("toolbar-recording-stopped", &summary);
+
+    // Small delay to ensure event is dispatched before windows close
+    std::thread::sleep(std::time::Duration::from_millis(50));
+
+    // Now dismiss UI overlays
+    let _ = dismiss_region_border(app.clone());
+    let _ = dismiss_recording_toolbar(app);
+
+    Ok(())
+}
+
+#[tauri::command]
+pub fn toolbar_cancel_recording(
+    app: AppHandle,
+    state: State<'_, AppState>,
+) -> Result<(), String> {
+    let mut recorder = state.recorder.lock().map_err(|e| e.to_string())?;
+    let session_dir = recorder.session_dir().map(|p| p.to_path_buf());
+    let _ = recorder.stop();
+
+    // Emit FIRST
+    let _ = app.emit("toolbar-recording-cancelled", ());
+    std::thread::sleep(std::time::Duration::from_millis(50));
+
+    // Then clean up UI
+    let _ = dismiss_region_border(app.clone());
+    let _ = dismiss_recording_toolbar(app);
+
+    // Delete the session directory
+    if let Some(dir) = session_dir {
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    Ok(())
+}
+
+// --- Open in Finder ---
+
+#[tauri::command]
+pub fn show_in_finder(session_id: String) -> Result<(), String> {
+    let session_dir = crate::capture::session_dir(&session_id);
+    if !session_dir.exists() {
+        return Err("Session not found".into());
+    }
+    #[cfg(target_os = "macos")]
+    {
+        std::process::Command::new("open")
+            .arg(session_dir.to_str().unwrap())
+            .spawn()
+            .map_err(|e| e.to_string())?;
+    }
+    Ok(())
+}
+
+// --- Sessions browser window ---
+
+#[tauri::command]
+pub fn show_sessions_browser(app: AppHandle) -> Result<(), String> {
+    use tauri::WebviewWindowBuilder;
+
+    // If already open, just focus it
+    if let Some(window) = app.get_webview_window("sessions_browser") {
+        let _ = window.show();
+        let _ = window.set_focus();
+        return Ok(());
+    }
+
+    WebviewWindowBuilder::new(
+        &app,
+        "sessions_browser",
+        tauri::WebviewUrl::App("/sessions-browser.html".into()),
+    )
+    .title("Recordings")
+    .inner_size(350.0, 600.0)
+    .min_inner_size(280.0, 400.0)
+    .resizable(true)
+    .title_bar_style(tauri::TitleBarStyle::Overlay)
+    .hidden_title(true)
+    .traffic_light_position(tauri::LogicalPosition::new(13.0, 9.0))
+    .build()
+    .map_err(|e| format!("Failed to create sessions browser: {}", e))?;
+
     Ok(())
 }
 
@@ -488,7 +668,9 @@ pub fn list_sessions() -> Result<Vec<SessionInfo>, String> {
         let path = entry.path();
         if !path.is_dir() { continue; }
 
-        let session_id = path.file_name().unwrap().to_string_lossy().to_string();
+        let dir_name = path.file_name().unwrap().to_string_lossy().to_string();
+        // Strip .capcap suffix to get clean session ID
+        let session_id = dir_name.strip_suffix(".capcap").unwrap_or(&dir_name).to_string();
         let video_path = path.join("video.mp4");
         if !video_path.exists() { continue; }
 
@@ -543,10 +725,11 @@ pub fn list_sessions() -> Result<Vec<SessionInfo>, String> {
 #[tauri::command]
 pub fn delete_session(session_id: String) -> Result<(), String> {
     // Validate session_id looks like a UUID to prevent path traversal
-    if session_id.len() != 36 || !session_id.chars().all(|c| c.is_ascii_hexdigit() || c == '-') {
+    let clean_id = session_id.strip_suffix(".capcap").unwrap_or(&session_id);
+    if clean_id.len() != 36 || !clean_id.chars().all(|c| c.is_ascii_hexdigit() || c == '-') {
         return Err("Invalid session ID".into());
     }
-    let session_path = crate::capture::sessions_dir().join(&session_id);
+    let session_path = crate::capture::session_dir(clean_id);
     if session_path.exists() {
         std::fs::remove_dir_all(&session_path).map_err(|e| e.to_string())?;
     }
@@ -555,7 +738,7 @@ pub fn delete_session(session_id: String) -> Result<(), String> {
 
 #[tauri::command]
 pub fn generate_thumbnail(session_id: String) -> Result<String, String> {
-    let session_dir = crate::capture::sessions_dir().join(&session_id);
+    let session_dir = crate::capture::session_dir(&session_id);
     let video_path = session_dir.join("video.mp4");
     let thumb_path = session_dir.join("thumbnail.jpg");
 

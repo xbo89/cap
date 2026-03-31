@@ -10,52 +10,64 @@
       background: transparent;
       overflow: hidden;
     }
-    .border {
+    .overlay {
       position: fixed;
       inset: 0;
-      border: 3px solid rgba(239, 68, 68, 0.8);
-      border-radius: 4px;
+      background: rgba(0, 0, 0, 0.4);
       pointer-events: none;
-      /* Subtle pulsing animation */
-      animation: pulse 2s ease-in-out infinite;
     }
-    @keyframes pulse {
-      0%, 100% { border-color: rgba(239, 68, 68, 0.8); }
-      50% { border-color: rgba(239, 68, 68, 0.4); }
-    }
-    /* Small "REC" indicator in top-left corner */
-    .rec-badge {
+    .border {
       position: fixed;
-      top: 6px;
-      left: 8px;
-      display: flex;
-      align-items: center;
-      gap: 4px;
-      background: rgba(0, 0, 0, 0.7);
-      color: #ef4444;
-      font: bold 10px -apple-system, sans-serif;
-      padding: 2px 6px;
-      border-radius: 4px;
+      /* Use outline instead of border — outline draws OUTSIDE the element
+         so it won't overlap with the recording region */
+      outline: 2px solid rgba(255, 255, 255, 0.9);
+      outline-offset: 0px;
+      border-radius: 2px;
       pointer-events: none;
-    }
-    .rec-dot {
-      width: 6px;
-      height: 6px;
-      background: #ef4444;
-      border-radius: 50%;
-      animation: blink 1s ease-in-out infinite;
-    }
-    @keyframes blink {
-      0%, 100% { opacity: 1; }
-      50% { opacity: 0.3; }
     }
   </style>
 </head>
 <body>
-  <div class="border"></div>
-  <div class="rec-badge">
-    <div class="rec-dot"></div>
-    REC
-  </div>
+  <div class="overlay" id="overlay"></div>
+  <div class="border" id="border"></div>
+  <script>
+    const params = new URLSearchParams(window.location.search);
+    const rx = parseFloat(params.get('x') || '0');
+    const ry = parseFloat(params.get('y') || '0');
+    const rw = parseFloat(params.get('w') || '0');
+    const rh = parseFloat(params.get('h') || '0');
+    const mx = parseFloat(params.get('monitorX') || '0');
+    const my = parseFloat(params.get('monitorY') || '0');
+
+    const localX = rx - mx;
+    const localY = ry - my;
+
+    const winW = window.innerWidth;
+    const winH = window.innerHeight;
+    const hasRegion = localX < winW && localY < winH && (localX + rw) > 0 && (localY + rh) > 0;
+
+    const overlay = document.getElementById('overlay');
+    const border = document.getElementById('border');
+
+    if (hasRegion && rw > 0 && rh > 0) {
+      // Clip-path cutout matches region exactly
+      overlay.style.clipPath = `polygon(
+        0% 0%, 100% 0%, 100% 100%, 0% 100%, 0% 0%,
+        ${localX}px ${localY}px,
+        ${localX}px ${localY + rh}px,
+        ${localX + rw}px ${localY + rh}px,
+        ${localX + rw}px ${localY}px,
+        ${localX}px ${localY}px
+      )`;
+
+      // Border element matches region exactly — outline draws outside
+      border.style.left = localX + 'px';
+      border.style.top = localY + 'px';
+      border.style.width = rw + 'px';
+      border.style.height = rh + 'px';
+    } else {
+      border.style.display = 'none';
+    }
+  </script>
 </body>
 </html>

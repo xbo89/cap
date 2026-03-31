@@ -7,14 +7,12 @@ use tauri::{
 
 pub fn setup_tray(app: &App) -> Result<(), Box<dyn std::error::Error>> {
     let show = MenuItemBuilder::with_id("show", "Show ScreenCap").build(app)?;
-    let open_editor = MenuItemBuilder::with_id("open_editor", "Open Editor").build(app)?;
     let start_rec = MenuItemBuilder::with_id("start_recording", "Start Recording").build(app)?;
     let stop_rec = MenuItemBuilder::with_id("stop_recording", "Stop Recording").build(app)?;
     let quit = MenuItemBuilder::with_id("quit", "Quit").build(app)?;
 
     let menu = MenuBuilder::new(app)
         .item(&show)
-        .item(&open_editor)
         .separator()
         .item(&start_rec)
         .item(&stop_rec)
@@ -35,13 +33,6 @@ pub fn setup_tray(app: &App) -> Result<(), Box<dyn std::error::Error>> {
                         let _ = window.show();
                         let _ = window.set_focus();
                     }
-                }
-                "open_editor" => {
-                    if let Some(window) = app.get_webview_window("main") {
-                        let _ = window.show();
-                        let _ = window.set_focus();
-                    }
-                    let _ = app.emit("tray-open-editor", ());
                 }
                 "start_recording" => {
                     // Open region selector overlay instead of directly starting
