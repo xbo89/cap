@@ -731,8 +731,6 @@ export function Timeline({
     <div className={cn("flex flex-col", className)}>
       {/* Toolbar */}
       <div className="flex items-center gap-2 px-3 py-1 border-b border-border text-xs">
-        <span className="text-muted-foreground">{formatTime(currentTime)} / {formatTime(sourceDuration)}</span>
-        <div className="w-px h-4 bg-border" />
         <button
           className="flex items-center gap-1 px-2 py-0.5 bg-secondary rounded text-muted-foreground hover:text-foreground"
           onClick={onSplit}
@@ -790,6 +788,8 @@ export function Timeline({
           <Plus className="h-3 w-3" />
           Subtitle
         </button>
+        <div className="flex-1" />
+        <span className="text-muted-foreground">{formatTime(currentTime)} / {formatTime(sourceDuration)}</span>
         <div className="flex-1" />
         <button
           className="p-0.5 bg-secondary rounded text-muted-foreground hover:text-foreground"

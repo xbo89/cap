@@ -1,5 +1,5 @@
 import { useEffect } from "react";
-import { listen } from "@tauri-apps/api/event";
+import { listen, emit } from "@tauri-apps/api/event";
 import { useAppStore } from "@/lib/store";
 import { ipc, type SessionSummary } from "@/lib/ipc";
 import { RecordingControls } from "@/components/recording/RecordingControls";
@@ -12,6 +12,10 @@ import "./index.css";
 async function stopAndOpenEditor() {
   const store = useAppStore.getState();
   try {
+    // Auto-save current project before loading new session
+    if (store.currentSession) {
+      await emit("save-current-project");
+    }
     const summary = await ipc.stopRecording();
     store.setRecording(false);
     store.setCurrentSession(summary);
@@ -54,6 +58,10 @@ function App() {
       const store = useAppStore.getState();
       const config = event.payload;
       try {
+        // Auto-save current project if editor is open before starting new recording
+        if (store.currentSession) {
+          await emit("save-current-project");
+        }
         // Brief delay to ensure overlay windows are fully closed
         await new Promise((r) => setTimeout(r, 50));
         await ipc.startRecording(config);
@@ -79,6 +87,10 @@ function App() {
       const store = useAppStore.getState();
       const summary = event.payload;
       try {
+        // Auto-save current project before loading new session
+        if (store.currentSession) {
+          await emit("save-current-project");
+        }
         store.setRecording(false);
         store.setCurrentSession(summary);
         const events = await ipc.getMouseMetadata(summary.session_id);

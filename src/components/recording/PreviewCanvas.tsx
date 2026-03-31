@@ -305,16 +305,36 @@ export function PreviewCanvas({
 
   useEffect(() => { zoomCalcRef.current = null; }, [videoRef]);
 
+  // Track video dimensions and draw first frame when video is ready
+  const drawFrameRef = useRef(drawFrame);
+  drawFrameRef.current = drawFrame;
+
   useEffect(() => {
     const video = videoRef.current;
     if (!video) return;
     const onLoaded = () => {
-      if (video.videoWidth > 0 && video.videoHeight > 0)
+      if (video.videoWidth > 0 && video.videoHeight > 0) {
         setVideoDims({ w: video.videoWidth, h: video.videoHeight });
+      }
+    };
+    // loadeddata fires when the first frame is available — draw it
+    const onDataReady = () => {
+      // Use rAF to ensure canvas has correct dimensions after React re-render
+      requestAnimationFrame(() => drawFrameRef.current());
     };
     video.addEventListener("loadedmetadata", onLoaded);
-    if (video.videoWidth > 0) onLoaded();
-    return () => video.removeEventListener("loadedmetadata", onLoaded);
+    video.addEventListener("loadeddata", onDataReady);
+    // Handle already-loaded video
+    if (video.readyState >= 2) {
+      onLoaded();
+      requestAnimationFrame(() => drawFrameRef.current());
+    } else if (video.videoWidth > 0) {
+      onLoaded();
+    }
+    return () => {
+      video.removeEventListener("loadedmetadata", onLoaded);
+      video.removeEventListener("loadeddata", onDataReady);
+    };
   }, [videoRef]);
 
   // Render loop driven by isPlaying prop (not video play/pause events).

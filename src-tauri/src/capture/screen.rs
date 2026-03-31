@@ -382,6 +382,8 @@ class Recorder: NSObject, SCStreamOutput {
         streamConfig.minimumFrameInterval = CMTime(value: 1, timescale: CMTimeScale(cfg.fps))
         streamConfig.pixelFormat = kCVPixelFormatType_32BGRA
         streamConfig.showsCursor = cfg.shows_cursor
+        // Use Display P3 color space to match macOS display output and preserve color accuracy
+        streamConfig.colorSpaceName = CGColorSpace.displayP3
 
         try? FileManager.default.removeItem(at: outputURL)
         writer = try AVAssetWriter(outputURL: outputURL, fileType: .mp4)
@@ -390,7 +392,13 @@ class Recorder: NSObject, SCStreamOutput {
             AVVideoCodecKey: AVVideoCodecType.h264,
             AVVideoWidthKey: streamConfig.width,
             AVVideoHeightKey: streamConfig.height,
-            AVVideoCompressionPropertiesKey: [AVVideoAverageBitRateKey: 8_000_000]
+            AVVideoCompressionPropertiesKey: [AVVideoAverageBitRateKey: 8_000_000],
+            // Embed Display P3 color metadata so players render colors correctly
+            AVVideoColorPropertiesKey: [
+                AVVideoColorPrimariesKey: AVVideoColorPrimaries_P3_D65,
+                AVVideoTransferFunctionKey: AVVideoTransferFunction_ITU_R_709_2,
+                AVVideoYCbCrMatrixKey: AVVideoYCbCrMatrix_ITU_R_709_2,
+            ]
         ]
         videoInput = AVAssetWriterInput(mediaType: .video, outputSettings: settings)
         videoInput?.expectsMediaDataInRealTime = true

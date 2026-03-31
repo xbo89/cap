@@ -1,4 +1,5 @@
 import { useEffect, useRef, useCallback, useState } from "react";
+import { listen } from "@tauri-apps/api/event";
 import { useAppStore } from "@/lib/store";
 import { ipc } from "@/lib/ipc";
 import type { Clip, Subtitle, SubtitleStyle, ZoomSegment, CaptureRegion } from "@/lib/ipc";
@@ -49,31 +50,47 @@ export function EditorView() {
     ...clips.map(c => c.end_time),
   ) + 10; // 10s buffer for dragging room
 
-  // Load session data
+  // Load session data — reset ALL state first to prevent stale data from previous session
   useEffect(() => {
     if (!sessionId) return;
+
+    // Reset all state immediately when session changes
+    setWaveform([]);
+    setDuration(0);
+    setCurrentTime(0);
+    setClips([]);
+    setSubtitles([]);
+    setIsPlaying(false);
+    setSelectedSubtitleIndex(null);
+    setSelectedZoomSegmentIndex(null);
+    setCaptureRegion(null);
+    setSaveStatus("idle");
+    setShowExport(false);
+    setZoomSegments([]);
+    setMouseEvents([]);
+
+    // Load new session data — use Promise.all for duration + project to avoid race conditions
     ipc.getMouseMetadata(sessionId).then(setMouseEvents).catch(console.error);
     ipc.getCaptureRegion(sessionId).then(setCaptureRegion).catch(console.error);
     ipc.getWaveform(sessionId, 100).then(setWaveform).catch(console.error);
-    ipc.getVideoDuration(sessionId).then((d) => {
+
+    Promise.all([
+      ipc.getVideoDuration(sessionId),
+      ipc.loadProject(sessionId),
+    ]).then(([d, project]) => {
       setDuration(d);
-      setClips([{ start_time: 0, end_time: d, media_offset: 0 }]);
-    }).catch(console.error);
-    ipc.loadProject(sessionId).then((project) => {
+
       if (project) {
-        // Migrate old projects: if media_offset is undefined/null, use start_time
         setClips(project.clips.map(c => ({
           ...c,
           media_offset: c.media_offset ?? c.start_time,
         })));
         setSubtitles(project.subtitles);
         if (project.zoom_effect) {
-          // Handle both new (segments) and legacy format
           const ze = project.zoom_effect as any;
           if (ze.segments) {
             setZoomSegments(ze.segments);
           } else if (ze.enabled) {
-            // Legacy migration: single full-duration segment
             setZoomSegments([{
               start_time: 0,
               end_time: project.clips.length > 0
@@ -83,13 +100,14 @@ export function EditorView() {
               follow_speed: ze.follow_speed,
               padding: ze.padding,
             }]);
-          } else {
-            setZoomSegments([]);
           }
         }
+      } else {
+        // No saved project — create default clip spanning full video
+        setClips([{ start_time: 0, end_time: d, media_offset: 0 }]);
       }
     }).catch(console.error);
-  }, [sessionId, setMouseEvents, setZoomSegments]);
+  }, [sessionId, setMouseEvents, setZoomSegments, setSelectedZoomSegmentIndex]);
 
   // Map timeline time → source video time via clip media_offset
   const timelineToSource = useCallback((tlTime: number): number | null => {
@@ -115,6 +133,19 @@ export function EditorView() {
   }, [timelineToSource]);
 
   const togglePlay = useCallback(() => {
+    const curClips = clipsRef.current;
+    const curTime = currentTimeRef.current;
+
+    // If at or past the end, restart from beginning before playing
+    const sorted = [...curClips].sort((a, b) => a.start_time - b.start_time);
+    const lastClip = sorted[sorted.length - 1];
+    if (lastClip && curTime >= lastClip.end_time - 0.05) {
+      setCurrentTime(0);
+      currentTimeRef.current = 0;
+      const video = videoRef.current;
+      if (video) video.currentTime = 0;
+    }
+
     setIsPlaying(prev => !prev);
   }, []);
 
@@ -255,6 +286,14 @@ export function EditorView() {
     return () => { if (autoSaveTimer.current) clearTimeout(autoSaveTimer.current); };
   }, [clips, subtitles, zoomSegments, sessionId, handleSave]);
 
+  // Listen for save-current-project event (triggered before loading a new session)
+  useEffect(() => {
+    const unlisten = listen("save-current-project", () => {
+      handleSave();
+    });
+    return () => { unlisten.then((u) => u()); };
+  }, [handleSave]);
+
   // Subtitle style change from canvas drag or properties panel
   const handleSubtitleStyleChange = useCallback((index: number, style: SubtitleStyle) => {
     setSubtitles(prev => {
@@ -372,8 +411,9 @@ export function EditorView() {
         {/* Video preview */}
         <div className="flex-1 flex flex-col items-center justify-center p-4 min-h-0">
           <div className="flex-1 min-h-0 w-full max-w-3xl flex items-center justify-center">
-            <video ref={videoRef} src={videoSrcUrl} className="hidden" playsInline preload="auto" />
+            <video key={sessionId} ref={videoRef} src={videoSrcUrl} className="hidden" playsInline preload="auto" />
             <PreviewCanvas
+              key={sessionId}
               videoRef={videoRef}
               mouseEvents={mouseEvents}
               clips={clips}
