@@ -148,12 +148,13 @@ export function EditorView() {
       const sorted = [...clipsRef.current].sort((a, b) => a.start_time - b.start_time);
       const newTime = currentTimeRef.current + dt;
 
-      // Check if past all content (past last clip's end)
+      // Check if past all content (stop exactly at last clip's end)
       const lastClip = sorted[sorted.length - 1];
-      if (!lastClip || newTime > (lastClip?.end_time ?? 0) + 0.5) {
+      if (!lastClip || newTime >= (lastClip?.end_time ?? 0)) {
+        const endTime = lastClip?.end_time ?? 0;
         video.pause();
-        currentTimeRef.current = newTime;
-        setCurrentTime(newTime);
+        currentTimeRef.current = endTime;
+        setCurrentTime(endTime);
         setIsPlaying(false);
         return;
       }

@@ -915,16 +915,18 @@ export function Timeline({
 }
 
 function getTimeStep(pxPerSec: number): number {
-  if (pxPerSec > 200) return 0.5;
-  if (pxPerSec > 100) return 1;
-  if (pxPerSec > 40) return 5;
-  if (pxPerSec > 15) return 10;
+  if (pxPerSec > 300) return 0.5;
+  if (pxPerSec > 150) return 1;
+  if (pxPerSec > 60) return 5;
+  if (pxPerSec > 25) return 10;
   return 30;
 }
 
-function formatTime(secs: number): string {
-  const m = Math.floor(secs / 60);
-  const s = Math.floor(secs % 60);
-  const ms = Math.floor((secs % 1) * 10);
-  return `${m}:${s.toString().padStart(2, "0")}.${ms}`;
+function formatTime(secs: number, fps = 60): string {
+  const totalSeconds = Math.max(0, secs);
+  const h = Math.floor(totalSeconds / 3600);
+  const m = Math.floor((totalSeconds % 3600) / 60);
+  const s = Math.floor(totalSeconds % 60);
+  const frames = Math.floor((totalSeconds % 1) * fps);
+  return `${h.toString().padStart(2, "0")}:${m.toString().padStart(2, "0")}:${s.toString().padStart(2, "0")}:${frames.toString().padStart(2, "0")}`;
 }
