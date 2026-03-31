@@ -74,20 +74,53 @@ fn default_line_height() -> f64 { 1.2 }
 fn default_blend_mode() -> String { "source-over".into() }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ZoomEffect {
-    pub enabled: bool,
+pub struct ZoomSegment {
+    pub start_time: f64,
+    pub end_time: f64,
     pub zoom_level: f64,
     pub follow_speed: f64,
     pub padding: f64,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(untagged)]
+pub enum ZoomEffect {
+    /// New format: list of zoom segments
+    Segments { segments: Vec<ZoomSegment> },
+    /// Legacy format: global toggle + config
+    Legacy {
+        enabled: bool,
+        zoom_level: f64,
+        follow_speed: f64,
+        padding: f64,
+    },
+}
+
 impl Default for ZoomEffect {
     fn default() -> Self {
-        Self {
-            enabled: true,
-            zoom_level: 2.0,
-            follow_speed: 0.15,
-            padding: 100.0,
+        ZoomEffect::Segments { segments: vec![] }
+    }
+}
+
+impl ZoomEffect {
+    /// Convert to segments, migrating legacy format if needed.
+    /// `duration` is used to create a full-length segment from legacy enabled config.
+    pub fn into_segments(self, duration: f64) -> Vec<ZoomSegment> {
+        match self {
+            ZoomEffect::Segments { segments } => segments,
+            ZoomEffect::Legacy { enabled, zoom_level, follow_speed, padding } => {
+                if enabled {
+                    vec![ZoomSegment {
+                        start_time: 0.0,
+                        end_time: duration,
+                        zoom_level,
+                        follow_speed,
+                        padding,
+                    }]
+                } else {
+                    vec![]
+                }
+            }
         }
     }
 }

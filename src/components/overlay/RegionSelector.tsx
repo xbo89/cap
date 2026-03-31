@@ -18,11 +18,21 @@ type DragMode =
 const HANDLE_SIZE = 8;
 const MIN_SIZE = 40;
 
+/** Read monitor offset from URL query params (set by show_region_selector). */
+function getMonitorOffset(): { x: number; y: number } {
+  const params = new URLSearchParams(window.location.search);
+  return {
+    x: parseFloat(params.get("monitorX") || "0"),
+    y: parseFloat(params.get("monitorY") || "0"),
+  };
+}
+
 export function RegionSelector() {
   const [region, setRegion] = useState<Rect | null>(null);
   const [drag, setDrag] = useState<DragMode>(null);
   const [cursor, setCursor] = useState("crosshair");
   const containerRef = useRef<HTMLDivElement>(null);
+  const monitorOffset = useRef(getMonitorOffset());
 
   // Escape to dismiss
   useEffect(() => {
@@ -242,7 +252,7 @@ export function RegionSelector() {
 
           {/* Toolbar below region */}
           {!drag && (
-            <OverlayToolbar region={region} />
+            <OverlayToolbar region={region} monitorOffset={monitorOffset.current} />
           )}
         </>
       )}

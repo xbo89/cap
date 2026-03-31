@@ -1,7 +1,7 @@
 import { useEffect, useRef, useCallback, useState } from "react";
 import { useAppStore } from "@/lib/store";
 import { ipc } from "@/lib/ipc";
-import type { Clip, Subtitle, SubtitleStyle } from "@/lib/ipc";
+import type { Clip, Subtitle, SubtitleStyle, ZoomSegment, CaptureRegion } from "@/lib/ipc";
 import { Button } from "@/components/ui/button";
 import { PreviewCanvas } from "@/components/recording/PreviewCanvas";
 import { ZoomSettings } from "@/components/zoom/ZoomSettings";
@@ -19,10 +19,10 @@ export function EditorView() {
     currentSession,
     mouseEvents,
     setMouseEvents,
-    zoomEnabled,
-    zoomConfig,
-    setZoomEnabled,
-    setZoomConfig,
+    zoomSegments,
+    setZoomSegments,
+    selectedZoomSegmentIndex,
+    setSelectedZoomSegmentIndex,
     setView,
   } = useAppStore();
 
@@ -34,6 +34,7 @@ export function EditorView() {
   const [showExport, setShowExport] = useState(false);
   const [isPlaying, setIsPlaying] = useState(false);
   const [selectedSubtitleIndex, setSelectedSubtitleIndex] = useState<number | null>(null);
+  const [captureRegion, setCaptureRegion] = useState<CaptureRegion | null>(null);
   const [sidebarOpen, setSidebarOpen] = useState(false);
   const [saveStatus, setSaveStatus] = useState<"idle" | "saving" | "saved">("idle");
   const videoRef = useRef<HTMLVideoElement>(null);
@@ -55,6 +56,7 @@ export function EditorView() {
   useEffect(() => {
     if (!sessionId) return;
     ipc.getMouseMetadata(sessionId).then(setMouseEvents).catch(console.error);
+    ipc.getCaptureRegion(sessionId).then(setCaptureRegion).catch(console.error);
     ipc.getWaveform(sessionId, 100).then(setWaveform).catch(console.error);
     ipc.getVideoDuration(sessionId).then((d) => {
       setDuration(d);
@@ -69,16 +71,28 @@ export function EditorView() {
         })));
         setSubtitles(project.subtitles);
         if (project.zoom_effect) {
-          setZoomEnabled(project.zoom_effect.enabled);
-          setZoomConfig({
-            zoomLevel: project.zoom_effect.zoom_level,
-            followSpeed: project.zoom_effect.follow_speed,
-            padding: project.zoom_effect.padding,
-          });
+          // Handle both new (segments) and legacy format
+          const ze = project.zoom_effect as any;
+          if (ze.segments) {
+            setZoomSegments(ze.segments);
+          } else if (ze.enabled) {
+            // Legacy migration: single full-duration segment
+            setZoomSegments([{
+              start_time: 0,
+              end_time: project.clips.length > 0
+                ? Math.max(...project.clips.map(c => c.end_time))
+                : 30,
+              zoom_level: ze.zoom_level,
+              follow_speed: ze.follow_speed,
+              padding: ze.padding,
+            }]);
+          } else {
+            setZoomSegments([]);
+          }
         }
       }
     }).catch(console.error);
-  }, [sessionId, setMouseEvents, setZoomEnabled, setZoomConfig]);
+  }, [sessionId, setMouseEvents, setZoomSegments]);
 
   // Map timeline time → source video time via clip media_offset
   const timelineToSource = useCallback((tlTime: number): number | null => {
@@ -187,6 +201,18 @@ export function EditorView() {
         return;
       }
     }
+    // Split selected zoom segment if playhead is within it
+    if (selectedZoomSegmentIndex !== null) {
+      const seg = zoomSegments[selectedZoomSegmentIndex];
+      if (seg && currentTime > seg.start_time + 0.1 && currentTime < seg.end_time - 0.1) {
+        const newSegs = [...zoomSegments];
+        const left = { ...seg, end_time: currentTime };
+        const right = { ...seg, start_time: currentTime };
+        newSegs.splice(selectedZoomSegmentIndex, 1, left, right);
+        setZoomSegments(newSegs);
+        return;
+      }
+    }
     // Otherwise split video clip
     const newClips: Clip[] = [];
     for (const clip of clips) {
@@ -199,7 +225,7 @@ export function EditorView() {
       }
     }
     setClips(newClips);
-  }, [clips, subtitles, currentTime, selectedSubtitleIndex]);
+  }, [clips, subtitles, zoomSegments, currentTime, selectedSubtitleIndex, selectedZoomSegmentIndex, setZoomSegments]);
 
   const handleSave = useCallback(async () => {
     if (!sessionId) return;
@@ -209,10 +235,7 @@ export function EditorView() {
       clips,
       subtitles,
       zoom_effect: {
-        enabled: zoomEnabled,
-        zoom_level: zoomConfig.zoomLevel,
-        follow_speed: zoomConfig.followSpeed,
-        padding: zoomConfig.padding,
+        segments: zoomSegments,
       },
       export_settings: {
         format: "Mp4H264",
@@ -223,7 +246,7 @@ export function EditorView() {
     });
     setSaveStatus("saved");
     setTimeout(() => setSaveStatus("idle"), 2000);
-  }, [sessionId, clips, subtitles, zoomEnabled, zoomConfig]);
+  }, [sessionId, clips, subtitles, zoomSegments]);
 
   // Auto-save: debounce 3s after edits
   const autoSaveTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -232,7 +255,7 @@ export function EditorView() {
     if (autoSaveTimer.current) clearTimeout(autoSaveTimer.current);
     autoSaveTimer.current = setTimeout(() => { handleSave(); }, 3000);
     return () => { if (autoSaveTimer.current) clearTimeout(autoSaveTimer.current); };
-  }, [clips, subtitles, zoomEnabled, zoomConfig, sessionId, handleSave]);
+  }, [clips, subtitles, zoomSegments, sessionId, handleSave]);
 
   // Open a different session from the sidebar
   const handleOpenSession = useCallback(async (sid: string) => {
@@ -273,6 +296,25 @@ export function EditorView() {
     });
   }, []);
 
+  // Zoom segment change from settings panel
+  const handleZoomSegmentChange = useCallback((segment: ZoomSegment) => {
+    if (selectedZoomSegmentIndex === null) return;
+    const newSegs = [...zoomSegments];
+    newSegs[selectedZoomSegmentIndex] = segment;
+    setZoomSegments(newSegs);
+  }, [zoomSegments, selectedZoomSegmentIndex, setZoomSegments]);
+
+  // When selecting a zoom segment, deselect subtitle and vice versa
+  const handleZoomSegmentSelect = useCallback((index: number | null) => {
+    setSelectedZoomSegmentIndex(index);
+    if (index !== null) setSelectedSubtitleIndex(null);
+  }, [setSelectedZoomSegmentIndex]);
+
+  const handleSubtitleSelect = useCallback((index: number | null) => {
+    setSelectedSubtitleIndex(index);
+    if (index !== null) setSelectedZoomSegmentIndex(null);
+  }, [setSelectedZoomSegmentIndex]);
+
   useKeyboard([
     { key: " ", action: togglePlay },
     { key: "s", action: handleSplit },
@@ -284,6 +326,10 @@ export function EditorView() {
         if (selectedSubtitleIndex !== null) {
           setSubtitles((prev) => prev.filter((_, i) => i !== selectedSubtitleIndex));
           setSelectedSubtitleIndex(null);
+        } else if (selectedZoomSegmentIndex !== null) {
+          const newSegs = zoomSegments.filter((_, i) => i !== selectedZoomSegmentIndex);
+          setZoomSegments(newSegs);
+          setSelectedZoomSegmentIndex(null);
         } else {
           setClips((prev) =>
             prev.filter((c) => !(currentTime >= c.start_time && currentTime <= c.end_time))
@@ -293,7 +339,10 @@ export function EditorView() {
     },
     {
       key: "Escape",
-      action: () => setSelectedSubtitleIndex(null),
+      action: () => {
+        setSelectedSubtitleIndex(null);
+        setSelectedZoomSegmentIndex(null);
+      },
     },
   ]);
 
@@ -312,6 +361,7 @@ export function EditorView() {
   const videoSrcUrl = videoUrl(currentSession.video_path);
   const thumbnails = useThumbnails(videoSrcUrl, duration);
   const selectedSub = selectedSubtitleIndex !== null ? subtitles[selectedSubtitleIndex] : null;
+  const selectedZoomSeg = selectedZoomSegmentIndex !== null ? zoomSegments[selectedZoomSegmentIndex] : null;
 
   return (
     <div className="flex flex-col h-full">
@@ -361,10 +411,10 @@ export function EditorView() {
               subtitles={subtitles}
               timelineTime={currentTime}
               isPlaying={isPlaying}
-              zoomConfig={zoomConfig}
-              zoomEnabled={zoomEnabled}
+              zoomSegments={zoomSegments}
+              captureRegion={captureRegion}
               selectedSubtitleIndex={selectedSubtitleIndex}
-              onSubtitleSelect={setSelectedSubtitleIndex}
+              onSubtitleSelect={handleSubtitleSelect}
               onSubtitleStyleChange={handleSubtitleStyleChange}
               width={1920}
               height={1080}
@@ -391,10 +441,8 @@ export function EditorView() {
             />
           ) : (
             <ZoomSettings
-              config={zoomConfig}
-              enabled={zoomEnabled}
-              onConfigChange={setZoomConfig}
-              onEnabledChange={setZoomEnabled}
+              segment={selectedZoomSeg}
+              onSegmentChange={handleZoomSegmentChange}
             />
           )}
         </div>
@@ -411,7 +459,11 @@ export function EditorView() {
           thumbnails={thumbnails}
           subtitles={subtitles}
           selectedSubtitleIndex={selectedSubtitleIndex}
-          onSubtitleSelect={setSelectedSubtitleIndex}
+          onSubtitleSelect={handleSubtitleSelect}
+          zoomSegments={zoomSegments}
+          selectedZoomSegmentIndex={selectedZoomSegmentIndex}
+          onZoomSegmentSelect={handleZoomSegmentSelect}
+          onZoomSegmentsChange={setZoomSegments}
           onSeek={handleSeek}
           onClipsChange={setClips}
           onSubtitlesChange={setSubtitles}
@@ -428,10 +480,7 @@ export function EditorView() {
             clips,
             subtitles,
             zoom_effect: {
-              enabled: zoomEnabled,
-              zoom_level: zoomConfig.zoomLevel,
-              follow_speed: zoomConfig.followSpeed,
-              padding: zoomConfig.padding,
+              segments: zoomSegments,
             },
             export_settings: {
               format: "Mp4H264",

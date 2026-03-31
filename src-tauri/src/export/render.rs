@@ -1,6 +1,7 @@
 use crate::capture::mouse::MouseEvent;
-use crate::export::zoom::{Point, ZoomCalculator, ZoomConfig};
-use crate::project::{Clip, ExportFormat, ExportQuality, ExportSettings, Subtitle};
+use crate::capture::CaptureRegion;
+use crate::export::zoom::{self, Point};
+use crate::project::{Clip, ExportFormat, ExportQuality, ExportSettings, Subtitle, ZoomSegment};
 use std::io::{BufRead, BufReader};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
@@ -35,8 +36,9 @@ pub struct ExportJob {
     pub output_path: PathBuf,
     pub clips: Vec<Clip>,
     pub subtitles: Vec<Subtitle>,
-    pub zoom_config: Option<ZoomConfig>,
+    pub zoom_segments: Vec<ZoomSegment>,
     pub mouse_events: Vec<MouseEvent>,
+    pub capture_region: Option<CaptureRegion>,
     pub export_settings: ExportSettings,
     pub video_width: u32,
     pub video_height: u32,
@@ -76,11 +78,12 @@ where
     // Build clip filter
     let clip_filter = build_clip_filter(&job.clips, input_has_audio, job.fps, job.video_width, job.video_height);
 
-    // Build zoom filter if enabled
-    let zoom_filter = if let Some(ref zoom_cfg) = job.zoom_config {
+    // Build zoom filter if there are zoom segments
+    let zoom_filter = if !job.zoom_segments.is_empty() {
         build_zoom_filter(
-            zoom_cfg,
+            &job.zoom_segments,
             &job.mouse_events,
+            job.capture_region.as_ref(),
             job.video_width,
             job.video_height,
             job.fps,
@@ -550,61 +553,73 @@ fn remap_to_output_time(time: f64, clips: &[Clip]) -> f64 {
 /// We pre-compute viewport keyframes and interpolate in the crop expression
 /// using ffmpeg's expression evaluator with linear interpolation on `t`.
 fn build_zoom_filter(
-    config: &ZoomConfig,
+    segments: &[ZoomSegment],
     mouse_events: &[MouseEvent],
+    capture_region: Option<&CaptureRegion>,
     width: u32,
     height: u32,
     fps: f64,
     duration: f64,
 ) -> String {
-    if mouse_events.is_empty() {
+    if mouse_events.is_empty() || segments.is_empty() {
         return String::new();
     }
 
-    let mut calc = ZoomCalculator::new(config.clone(), width as f64, height as f64);
     let scale_factor = 2.0;
+    // Subtract capture region offset to get video-local mouse coordinates
+    let region_x = capture_region.map(|r| r.x).unwrap_or(0.0);
+    let region_y = capture_region.map(|r| r.y).unwrap_or(0.0);
+    let mouse_data: Vec<(f64, f64, f64)> = mouse_events
+        .iter()
+        .take_while(|e| (e.timestamp_us as f64 / 1_000_000.0) <= duration)
+        .map(|e| (
+            e.timestamp_us as f64 / 1_000_000.0,
+            (e.x - region_x) * scale_factor,
+            (e.y - region_y) * scale_factor,
+        ))
+        .collect();
 
-    // Step 1: Compute viewport for EVERY mouse event at native rate.
-    // This matches the preview's 60fps exponential smoothing exactly.
-    let mut all_viewports: Vec<(f64, f64, f64, f64, f64)> = Vec::new(); // (t, x, y, w, h)
-    let mut prev_t = 0.0;
+    let viewports = zoom::compute_all_viewports(segments, width as f64, height as f64, &mouse_data);
 
-    for event in mouse_events {
-        let t = event.timestamp_us as f64 / 1_000_000.0;
-        if t > duration { break; }
-
-        let mouse = Point {
-            x: event.x * scale_factor,
-            y: event.y * scale_factor,
-        };
-
-        let dt = if t > prev_t { t - prev_t } else { 1.0 / 60.0 };
-        prev_t = t;
-
-        let vp = calc.compute(mouse, dt);
-        all_viewports.push((t, vp.src_x, vp.src_y, vp.src_w, vp.src_h));
-    }
-
-    if all_viewports.is_empty() {
+    if viewports.is_empty() {
         return String::new();
     }
 
-    // Step 2: Downsample to evenly-spaced keyframes for ffmpeg expressions.
-    // Use enough keyframes (10fps) for smooth interpolation, max 100.
-    let kf_interval = 0.1; // 10fps keyframes
-    let num_kf = ((duration / kf_interval) as usize + 1).min(200);
-    let mut keyframes: Vec<(f64, f64, f64, f64, f64)> = Vec::new();
+    // Determine the time ranges where zoom is actually active (spring > 1.01).
+    // We only need keyframes during zoom transitions + active zoom regions,
+    // plus a small margin around each segment for the spring transition.
+    let margin = 1.0; // seconds before/after each segment for spring transition
+    let mut active_ranges: Vec<(f64, f64)> = Vec::new();
+    for seg in segments {
+        let start = (seg.start_time - margin).max(0.0);
+        let end = (seg.end_time + margin).min(duration);
+        // Merge with last range if overlapping
+        if let Some(last) = active_ranges.last_mut() {
+            if start <= last.1 {
+                last.1 = end.max(last.1);
+                continue;
+            }
+        }
+        active_ranges.push((start, end));
+    }
+
+    // Sample keyframes only within active ranges at 10fps
+    let kf_interval = 0.1;
+    let mut keyframes: Vec<(f64, f64, f64, f64, f64)> = Vec::new(); // (t, x, y, w, h)
     let mut vp_idx = 0;
 
-    for i in 0..num_kf {
-        let t = i as f64 * kf_interval;
-        // Find the viewport closest to this time
-        while vp_idx + 1 < all_viewports.len() && all_viewports[vp_idx + 1].0 <= t {
-            vp_idx += 1;
-        }
-        if vp_idx < all_viewports.len() {
-            let vp = &all_viewports[vp_idx];
-            keyframes.push((t, vp.1, vp.2, vp.3, vp.4));
+    for &(range_start, range_end) in &active_ranges {
+        let mut t = range_start;
+        while t <= range_end {
+            // Find the viewport closest to this time
+            while vp_idx + 1 < viewports.len() && viewports[vp_idx + 1].0 <= t {
+                vp_idx += 1;
+            }
+            if vp_idx < viewports.len() {
+                let vp = &viewports[vp_idx].1;
+                keyframes.push((t, vp.src_x, vp.src_y, vp.src_w, vp.src_h));
+            }
+            t += kf_interval;
         }
     }
 
@@ -612,26 +627,63 @@ fn build_zoom_filter(
         return String::new();
     }
 
-    // Downsample further if too many keyframes for ffmpeg expression length
-    let max_kf = 60;
+    // Add "no zoom" anchors at the boundaries so expression returns full-frame outside active ranges
+    let fw = width as f64;
+    let fh = height as f64;
+    if let Some(first) = keyframes.first() {
+        if first.0 > 0.01 {
+            keyframes.insert(0, (0.0, 0.0, 0.0, fw, fh));
+        }
+    }
+    if let Some(last) = keyframes.last() {
+        if last.0 < duration - 0.01 {
+            keyframes.push((duration, 0.0, 0.0, fw, fh));
+        }
+    }
+
+    // ffmpeg's crop filter evaluates w/h only once, not per-frame.
+    // For spring-based zoom where crop dimensions change every frame,
+    // we use zoompan which evaluates zoom/x/y per-frame.
+    //
+    // zoompan zoom=Z:x=X:y=Y:d=1:s=WxH:fps=fps
+    //   Z = zoom factor (1.0 = no zoom, 2.0 = 2x zoom)
+    //   x/y = pan position (top-left of viewport in zoomed coordinates)
+    //
+    // Convert our viewport (srcX, srcY, srcW, srcH) to zoompan params:
+    //   zoom = frameWidth / srcW  (since srcW = frameWidth / zoomLevel)
+    //   x = srcX * zoom  (zoompan x/y are in output-scaled coordinates)
+    //   y = srcY * zoom
+
+    let max_kf = 40;
     let step = if keyframes.len() > max_kf {
-        keyframes.len() / max_kf
+        (keyframes.len() + max_kf - 1) / max_kf
     } else {
         1
     };
-    let kf: Vec<_> = keyframes.iter().step_by(step).collect();
 
-    let crop_w = kf[0].3 as u32;
-    let crop_h = kf[0].4 as u32;
+    // Convert viewport keyframes to zoompan parameters
+    let zp_keyframes: Vec<(f64, f64, f64, f64)> = keyframes  // (t, zoom, x, y)
+        .iter()
+        .step_by(step)
+        .map(|kf| {
+            let zoom = if kf.3 > 0.0 { fw / kf.3 } else { 1.0 };
+            let zp_x = kf.1 * zoom;
+            let zp_y = kf.2 * zoom;
+            (kf.0, zoom, zp_x, zp_y)
+        })
+        .collect();
 
-    // Build piecewise expression for x position
-    // Escape commas with \, so ffmpeg's filtergraph parser doesn't treat them as filter separators
-    let x_expr = build_piecewise_expr(&kf, |k| k.1).replace(',', "\\,");
-    let y_expr = build_piecewise_expr(&kf, |k| k.2).replace(',', "\\,");
+    let zp_refs: Vec<_> = zp_keyframes.iter().collect();
 
+    let z_expr = build_zoompan_expr(&zp_refs, |k| k.1).replace(',', "\\,");
+    let x_expr = build_zoompan_expr(&zp_refs, |k| k.2).replace(',', "\\,");
+    let y_expr = build_zoompan_expr(&zp_refs, |k| k.3).replace(',', "\\,");
+
+    // zoompan: d=1 means each input frame produces 1 output frame (no frame duplication)
     format!(
-        "crop=w={}:h={}:x={}:y={},scale={}:{}",
-        crop_w, crop_h, x_expr, y_expr, width, height
+        "zoompan=z='{z_expr}':x='{x_expr}':y='{y_expr}':d=1:s={width}x{height}:fps={fps}",
+        z_expr = z_expr, x_expr = x_expr, y_expr = y_expr,
+        width = width, height = height, fps = fps as u32,
     )
 }
 
@@ -666,6 +718,40 @@ fn build_piecewise_expr(
         };
 
         expr = format!("if(lt(t,{:.3}),{},{})", t1, interp, expr);
+    }
+
+    expr
+}
+
+/// Build piecewise-linear expression for zoompan (uses `in_time` instead of `t`).
+fn build_zoompan_expr(
+    keyframes: &[&(f64, f64, f64, f64)],
+    get_val: impl Fn(&(f64, f64, f64, f64)) -> f64,
+) -> String {
+    if keyframes.len() <= 1 {
+        return format!("{:.2}", get_val(keyframes[0]));
+    }
+
+    let mut expr = format!("{:.2}", get_val(keyframes.last().unwrap()));
+
+    for i in (0..keyframes.len() - 1).rev() {
+        let t0 = keyframes[i].0;
+        let t1 = keyframes[i + 1].0;
+        let v0 = get_val(keyframes[i]);
+        let v1 = get_val(keyframes[i + 1]);
+
+        if (t1 - t0).abs() < 0.001 {
+            continue;
+        }
+
+        let slope = (v1 - v0) / (t1 - t0);
+        let interp = if slope.abs() < 0.01 {
+            format!("{:.2}", v0)
+        } else {
+            format!("{:.2}+{:.4}*(in_time-{:.3})", v0, slope, t0)
+        };
+
+        expr = format!("if(lt(in_time,{:.3}),{},{})", t1, interp, expr);
     }
 
     expr

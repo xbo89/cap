@@ -5,9 +5,10 @@ import { Camera, ChevronDown, Monitor, Video } from "lucide-react";
 
 interface OverlayToolbarProps {
   region: { x: number; y: number; w: number; h: number };
+  monitorOffset: { x: number; y: number };
 }
 
-export function OverlayToolbar({ region }: OverlayToolbarProps) {
+export function OverlayToolbar({ region, monitorOffset }: OverlayToolbarProps) {
   const [captureAudio, setCaptureAudio] = useState(true);
   const [captureMic, setCaptureMic] = useState(false);
   const [showDropdown, setShowDropdown] = useState(false);
@@ -17,37 +18,40 @@ export function OverlayToolbar({ region }: OverlayToolbarProps) {
     const primary = sources.find((s) => s.is_primary) || sources[0];
     if (!primary) return;
 
+    // Convert window-local region to global screen coordinates
+    const globalRegion = {
+      x: region.x + monitorOffset.x,
+      y: region.y + monitorOffset.y,
+      width: region.w,
+      height: region.h,
+    };
+
     const sessionId = await ipc.startRecording({
       source_id: primary.id,
       fps: 60,
       capture_audio: captureAudio,
       capture_mic: captureMic,
-      region: {
-        x: region.x,
-        y: region.y,
-        width: region.w,
-        height: region.h,
-      },
+      region: globalRegion,
     });
 
     // Notify main window that recording has started
     await emit("recording-started", {
       session_id: sessionId,
-      region: { x: region.x, y: region.y, width: region.w, height: region.h },
+      region: globalRegion,
     });
 
     await ipc.dismissRegionSelector();
-  }, [region, captureAudio, captureMic]);
+  }, [region, monitorOffset, captureAudio, captureMic]);
 
   const handleScreenshotRegion = useCallback(async () => {
     await ipc.takeScreenshot({
-      x: region.x,
-      y: region.y,
+      x: region.x + monitorOffset.x,
+      y: region.y + monitorOffset.y,
       width: region.w,
       height: region.h,
     });
     await ipc.dismissRegionSelector();
-  }, [region]);
+  }, [region, monitorOffset]);
 
   const handleScreenshotFull = useCallback(async () => {
     await ipc.takeScreenshot();

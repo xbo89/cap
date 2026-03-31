@@ -99,11 +99,16 @@ export interface Subtitle {
   style?: SubtitleStyle;
 }
 
-export interface ZoomEffectConfig {
-  enabled: boolean;
+export interface ZoomSegment {
+  start_time: number;
+  end_time: number;
   zoom_level: number;
   follow_speed: number;
   padding: number;
+}
+
+export interface ZoomEffectConfig {
+  segments: ZoomSegment[];
 }
 
 export interface ExportSettings {
@@ -174,6 +179,9 @@ export const ipc = {
 
   getMouseMetadata: (sessionId: string) =>
     invoke<MouseEvent[]>("get_mouse_metadata", { sessionId }),
+
+  getCaptureRegion: (sessionId: string) =>
+    invoke<CaptureRegion | null>("get_capture_region", { sessionId }),
 
   getWaveform: (sessionId: string, samplesPerSec = 100) =>
     invoke<number[]>("get_waveform", { sessionId, samplesPerSec }),

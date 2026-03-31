@@ -3,8 +3,7 @@ use crate::capture::mouse::MouseEvent;
 use crate::capture::screen::Recorder;
 use crate::capture::{CaptureRegion, CaptureSource, RecordingConfig, SessionId, SessionSummary};
 use crate::export::render::{self, CancelFlag, ExportJob};
-use crate::export::zoom::ZoomConfig;
-use crate::project::{ExportFormat, ExportQuality, ExportSettings, Project};
+use crate::project::{ExportFormat, ExportQuality, ExportSettings, Project, ZoomSegment};
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use tauri::{AppHandle, Emitter, Manager, State};
@@ -87,6 +86,19 @@ pub fn get_mouse_metadata(session_id: String) -> Result<Vec<MouseEvent>, String>
         .join("metadata.json");
     let data = std::fs::read_to_string(&metadata_path).map_err(|e| e.to_string())?;
     serde_json::from_str(&data).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub fn get_capture_region(session_id: String) -> Result<Option<crate::capture::CaptureRegion>, String> {
+    let region_path = crate::capture::sessions_dir()
+        .join(&session_id)
+        .join("region.json");
+    if !region_path.exists() {
+        return Ok(None);
+    }
+    let data = std::fs::read_to_string(&region_path).map_err(|e| e.to_string())?;
+    let region = serde_json::from_str(&data).map_err(|e| e.to_string())?;
+    Ok(Some(region))
 }
 
 #[tauri::command]
@@ -193,19 +205,20 @@ pub fn start_export(
         vec![]
     };
 
+    // Load capture region
+    let region_path = session_dir.join("region.json");
+    let capture_region: Option<crate::capture::CaptureRegion> = if region_path.exists() {
+        let data = std::fs::read_to_string(&region_path).map_err(|e| e.to_string())?;
+        serde_json::from_str(&data).ok()
+    } else {
+        None
+    };
+
     // Get video info
     let video_info = get_video_info(session_id.clone())?;
     let duration = audio::get_video_duration(&session_dir.join("video.mp4"))?;
 
-    let zoom_config = if project.zoom_effect.enabled {
-        Some(ZoomConfig {
-            zoom_level: project.zoom_effect.zoom_level,
-            follow_speed: project.zoom_effect.follow_speed,
-            padding: project.zoom_effect.padding,
-        })
-    } else {
-        None
-    };
+    let zoom_segments = project.zoom_effect.into_segments(duration);
 
     // Use custom fps from export settings, or fall back to source video fps
     let export_fps = project.export_settings.fps.unwrap_or(video_info.fps);
@@ -215,8 +228,9 @@ pub fn start_export(
         output_path: PathBuf::from(&output_path),
         clips: project.clips,
         subtitles: project.subtitles,
-        zoom_config,
+        zoom_segments,
         mouse_events,
+        capture_region,
         export_settings: project.export_settings,
         video_width: video_info.width,
         video_height: video_info.height,
@@ -364,10 +378,12 @@ pub fn show_region_selector(app: AppHandle) -> Result<Vec<MonitorInfo>, String> 
         let logical_x = pos.x as f64 / scale;
         let logical_y = pos.y as f64 / scale;
 
+        // Pass monitor offset as query params so the overlay knows its global position
+        let url = format!("/overlay.html?monitorX={}&monitorY={}", logical_x, logical_y);
         let builder = WebviewWindowBuilder::new(
             &app,
             &label,
-            tauri::WebviewUrl::App("/overlay.html".into()),
+            tauri::WebviewUrl::App(url.into()),
         )
         .title("")
         .inner_size(logical_w, logical_h)

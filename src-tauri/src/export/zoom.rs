@@ -1,26 +1,5 @@
 use serde::{Deserialize, Serialize};
-
-/// Zoom effect configuration
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ZoomConfig {
-    /// Zoom magnification level (e.g. 2.0 = 200%)
-    pub zoom_level: f64,
-    /// Follow speed: 0.0 = no follow, 1.0 = instant snap
-    /// Controls the exponential smoothing alpha
-    pub follow_speed: f64,
-    /// Minimum distance (px) from mouse to viewport edge
-    pub padding: f64,
-}
-
-impl Default for ZoomConfig {
-    fn default() -> Self {
-        Self {
-            zoom_level: 2.0,
-            follow_speed: 0.15,
-            padding: 100.0,
-        }
-    }
-}
+use crate::project::ZoomSegment;
 
 /// Represents a 2D point
 #[derive(Debug, Clone, Copy, Serialize, Deserialize)]
@@ -39,22 +18,57 @@ pub struct Viewport {
     pub src_h: f64,
 }
 
+/// Critically-damped spring (zeta = 1.0, no overshoot).
+/// Must match the TypeScript implementation in lib/zoom.ts.
+pub struct CriticallyDampedSpring {
+    pub value: f64,
+    pub velocity: f64,
+    omega: f64,
+}
+
+impl CriticallyDampedSpring {
+    pub fn new(initial_value: f64, omega: f64) -> Self {
+        Self {
+            value: initial_value,
+            velocity: 0.0,
+            omega,
+        }
+    }
+
+    /// Advance the spring toward `target` by `dt` seconds.
+    pub fn advance(&mut self, target: f64, dt: f64) -> f64 {
+        let x = self.value - target;
+        let v = self.velocity;
+        let w = self.omega;
+        let exp_term = (-w * dt).exp();
+        self.value = target + (x + (v + w * x) * dt) * exp_term;
+        self.velocity = (v - w * (v + w * x) * dt) * exp_term;
+        self.value
+    }
+
+    pub fn reset(&mut self, value: f64) {
+        self.value = value;
+        self.velocity = 0.0;
+    }
+}
+
+/// Find the active zoom segment at a given time.
+pub fn find_active_segment(segments: &[ZoomSegment], time: f64) -> Option<&ZoomSegment> {
+    segments.iter().find(|s| time >= s.start_time && time <= s.end_time)
+}
+
 /// Stateful zoom viewport calculator.
 /// Uses exponential smoothing for smooth mouse following.
 pub struct ZoomCalculator {
-    config: ZoomConfig,
-    /// Full frame dimensions
     frame_width: f64,
     frame_height: f64,
-    /// Current smoothed viewport center
     center: Point,
     initialized: bool,
 }
 
 impl ZoomCalculator {
-    pub fn new(config: ZoomConfig, frame_width: f64, frame_height: f64) -> Self {
+    pub fn new(frame_width: f64, frame_height: f64) -> Self {
         Self {
-            config,
             frame_width,
             frame_height,
             center: Point {
@@ -65,34 +79,24 @@ impl ZoomCalculator {
         }
     }
 
-    /// Compute the viewport for a frame given mouse position and time delta.
-    ///
-    /// `dt` is the time in seconds since the previous frame.
-    /// `mouse` is the current mouse position in screen coordinates.
-    ///
-    /// Returns the source rectangle to crop from the original frame.
-    pub fn compute(&mut self, mouse: Point, dt: f64) -> Viewport {
+    /// Compute the viewport for a frame given mouse position, time delta,
+    /// and the current spring-interpolated zoom level + follow speed.
+    pub fn compute(&mut self, mouse: Point, dt: f64, zoom_level: f64, follow_speed: f64) -> Viewport {
         if !self.initialized {
             self.center = mouse;
             self.initialized = true;
         }
 
-        // Exponential smoothing: viewport_center moves toward mouse position
-        // alpha = 1 - e^(-follow_speed * dt * 60)
-        // The *60 normalizes so follow_speed feels consistent regardless of framerate
-        let alpha = 1.0 - (-self.config.follow_speed * dt * 60.0).exp();
+        let alpha = 1.0 - (-follow_speed * dt * 60.0).exp();
         self.center.x += (mouse.x - self.center.x) * alpha;
         self.center.y += (mouse.y - self.center.y) * alpha;
 
-        // Viewport size at current zoom level
-        let vw = self.frame_width / self.config.zoom_level;
-        let vh = self.frame_height / self.config.zoom_level;
+        let vw = self.frame_width / zoom_level;
+        let vh = self.frame_height / zoom_level;
 
-        // Compute top-left of viewport, clamped to frame bounds
         let mut sx = self.center.x - vw / 2.0;
         let mut sy = self.center.y - vh / 2.0;
 
-        // Clamp to frame boundaries
         sx = sx.clamp(0.0, self.frame_width - vw);
         sy = sy.clamp(0.0, self.frame_height - vh);
 
@@ -113,15 +117,16 @@ impl ZoomCalculator {
     }
 }
 
-/// Batch compute viewports for an entire recording.
+/// Batch compute viewports for an entire recording with segment-based zoom.
 /// Used during export to pre-calculate all viewport positions.
 pub fn compute_all_viewports(
-    config: &ZoomConfig,
+    segments: &[ZoomSegment],
     frame_width: f64,
     frame_height: f64,
     mouse_events: &[(f64, f64, f64)], // (timestamp_secs, x, y)
-) -> Vec<Viewport> {
-    let mut calc = ZoomCalculator::new(config.clone(), frame_width, frame_height);
+) -> Vec<(f64, Viewport)> {
+    let mut calc = ZoomCalculator::new(frame_width, frame_height);
+    let mut spring = CriticallyDampedSpring::new(1.0, 10.0);
     let mut viewports = Vec::with_capacity(mouse_events.len());
     let mut prev_time = 0.0;
 
@@ -132,7 +137,17 @@ pub fn compute_all_viewports(
             1.0 / 60.0
         };
         prev_time = timestamp;
-        viewports.push(calc.compute(Point { x, y }, dt));
+
+        let active = find_active_segment(segments, timestamp);
+        let target_level = active.map(|s| s.zoom_level).unwrap_or(1.0);
+        let follow_speed = active.map(|s| s.follow_speed).unwrap_or(0.15);
+
+        let current_level = spring.advance(target_level, dt).max(1.0);
+
+        // Always compute viewport — when level ≈ 1.0 it returns the full frame,
+        // avoiding discontinuities at zoom transitions.
+        let vp = calc.compute(Point { x, y }, dt, current_level, follow_speed);
+        viewports.push((timestamp, vp));
     }
 
     viewports

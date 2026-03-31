@@ -13,6 +13,7 @@ pub struct Recorder {
     start_time: Option<Instant>,
     recording_process: Option<std::process::Child>,
     is_recording: Arc<Mutex<bool>>,
+    capture_region: Option<super::CaptureRegion>,
 }
 
 impl Recorder {
@@ -24,6 +25,7 @@ impl Recorder {
             start_time: None,
             recording_process: None,
             is_recording: Arc::new(Mutex::new(false)),
+            capture_region: None,
         }
     }
 
@@ -110,6 +112,7 @@ impl Recorder {
         self.mouse_tracker = Some(mouse_tracker);
         self.start_time = Some(Instant::now());
         self.recording_process = Some(child);
+        self.capture_region = config.region.clone();
 
         Ok(session_id)
     }
@@ -173,6 +176,12 @@ impl Recorder {
         let metadata_path = session_dir.join("metadata.json");
         std::fs::write(&metadata_path, serde_json::to_string(&mouse_events).unwrap_or_default())
             .map_err(|e| e.to_string())?;
+
+        // Save capture region info if present
+        if let Some(ref region) = self.capture_region {
+            let region_path = session_dir.join("region.json");
+            let _ = std::fs::write(&region_path, serde_json::to_string(region).unwrap_or_default());
+        }
 
         let video_path = session_dir.join("video.mp4");
         let file_size_bytes = std::fs::metadata(&video_path).map(|m| m.len()).unwrap_or(0);
@@ -261,10 +270,15 @@ class Recorder: NSObject, SCStreamOutput {{
 
     func start() async throws {{
         let content = try await SCShareableContent.excludingDesktopWindows(false, onScreenWindowsOnly: true)
-        guard let display = content.displays.first else {{
+        guard !content.displays.isEmpty else {{
             fputs("ERROR: No display found\n", stderr)
             exit(1)
         }}
+
+        // Find the display that contains the capture region (if specified),
+        // otherwise use the first display.
+        var display = content.displays[0]
+        {display_selection_code}
 
         let filter = SCContentFilter(display: display, excludingWindows: [])
         let config = SCStreamConfiguration()
@@ -445,10 +459,31 @@ RunLoop.current.run()
         stop_flag = stop_flag.replace('\\', "\\\\").replace('"', "\\\""),
         done_flag = done_flag.replace('\\', "\\\\").replace('"', "\\\""),
         fps = fps,
-        region_code = if let Some((x, y, w, h)) = region {
-            // Region capture: crop to specified area, scale factor 2x for retina
+        display_selection_code = if let Some((x, y, w, h)) = region {
+            // Pick the display whose frame contains the center of the region
             format!(
-                "config.sourceRect = CGRect(x: {x}, y: {y}, width: {w}, height: {h})\n        config.width = Int({w}) * 2\n        config.height = Int({h}) * 2",
+                r#"let regionCenter = CGPoint(x: {cx}, y: {cy})
+        for d in content.displays {{
+            let frame = CGDisplayBounds(d.displayID)
+            if frame.contains(regionCenter) {{
+                display = d
+                break
+            }}
+        }}"#,
+                cx = x + w / 2.0,
+                cy = y + h / 2.0,
+            )
+        } else {
+            String::new()
+        },
+        region_code = if let Some((x, y, w, h)) = region {
+            // Region capture: sourceRect is display-relative, so subtract display origin.
+            // Global region coords are converted to display-local coords in Swift.
+            format!(
+                r#"let displayBounds = CGDisplayBounds(display.displayID)
+        config.sourceRect = CGRect(x: {x} - displayBounds.origin.x, y: {y} - displayBounds.origin.y, width: {w}, height: {h})
+        config.width = Int({w}) * 2
+        config.height = Int({h}) * 2"#,
                 x = x, y = y, w = w, h = h
             )
         } else {

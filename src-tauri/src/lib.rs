@@ -160,6 +160,7 @@ pub fn run() {
             commands::stop_recording,
             commands::get_recording_status,
             commands::get_mouse_metadata,
+            commands::get_capture_region,
             commands::get_waveform,
             commands::get_video_duration,
             commands::get_video_info,

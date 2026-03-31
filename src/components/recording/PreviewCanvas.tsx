@@ -1,6 +1,6 @@
 import { useRef, useEffect, useCallback, useState } from "react";
-import { ZoomCalculator, type ZoomConfig } from "@/lib/zoom";
-import type { MouseEvent as MouseEventData, Clip, Subtitle, SubtitleStyle } from "@/lib/ipc";
+import { ZoomCalculator, CriticallyDampedSpring, findActiveSegment, type ZoomSegment } from "@/lib/zoom";
+import type { MouseEvent as MouseEventData, Clip, Subtitle, SubtitleStyle, CaptureRegion } from "@/lib/ipc";
 import { defaultSubtitleStyle } from "@/lib/ipc";
 
 interface SubtitleBounds {
@@ -16,8 +16,8 @@ interface PreviewCanvasProps {
   subtitles?: Subtitle[];
   timelineTime?: number;
   isPlaying?: boolean;
-  zoomConfig: ZoomConfig;
-  zoomEnabled: boolean;
+  zoomSegments: ZoomSegment[];
+  captureRegion?: CaptureRegion | null;
   selectedSubtitleIndex: number | null;
   onSubtitleSelect: (index: number | null) => void;
   onSubtitleStyleChange: (index: number, style: SubtitleStyle) => void;
@@ -34,8 +34,8 @@ export function PreviewCanvas({
   subtitles = [],
   timelineTime,
   isPlaying = false,
-  zoomConfig,
-  zoomEnabled,
+  zoomSegments,
+  captureRegion,
   selectedSubtitleIndex,
   onSubtitleSelect,
   onSubtitleStyleChange,
@@ -46,6 +46,7 @@ export function PreviewCanvas({
   const overlayRef = useRef<HTMLDivElement>(null);
   const animFrameRef = useRef<number>(0);
   const zoomCalcRef = useRef<ZoomCalculator | null>(null);
+  const springRef = useRef(new CriticallyDampedSpring(1.0, 10.0));
   const subtitleBoundsRef = useRef<SubtitleBounds[]>([]);
   const tlTimeRef = useRef(timelineTime ?? 0);
   if (timelineTime !== undefined) tlTimeRef.current = timelineTime;
@@ -234,7 +235,7 @@ export function PreviewCanvas({
     if (vw === 0 || vh === 0) return;
 
     if (!zoomCalcRef.current) {
-      zoomCalcRef.current = new ZoomCalculator(zoomConfig, vw, vh);
+      zoomCalcRef.current = new ZoomCalculator(vw, vh);
     }
 
     // Use timeline time for gap/subtitle checks (source time for video frame is already set by EditorView)
@@ -246,14 +247,27 @@ export function PreviewCanvas({
     if (!inClip) {
       ctx.fillStyle = "#000000";
       ctx.fillRect(0, 0, canvas.width, canvas.height);
-    } else if (zoomEnabled) {
+    } else {
+      // Spring-driven zoom: find active segment, advance spring
+      const activeSeg = findActiveSegment(zoomSegments, tlTime);
+      const targetLevel = activeSeg ? activeSeg.zoom_level : 1.0;
+      const followSpeed = activeSeg ? activeSeg.follow_speed : 0.15;
+      const currentLevel = springRef.current.advance(targetLevel, 1 / 60);
+
       const currentTimeUs = video.currentTime * 1_000_000;
       const mouseEvent = findMouseEvent(currentTimeUs);
+
+      // Always use viewport-based rendering to avoid jump at zoom transitions.
+      // When currentLevel ≈ 1.0, viewport covers the full frame seamlessly.
       if (mouseEvent) {
         const sf = 2;
-        const mpx = mouseEvent.x * sf;
-        const mpy = mouseEvent.y * sf;
-        const vp = zoomCalcRef.current.compute(mpx, mpy, 1 / 60);
+        // Mouse events are in absolute screen coordinates.
+        // Subtract capture region offset to get video-local coordinates.
+        const regionX = captureRegion?.x ?? 0;
+        const regionY = captureRegion?.y ?? 0;
+        const mpx = (mouseEvent.x - regionX) * sf;
+        const mpy = (mouseEvent.y - regionY) * sf;
+        const vp = zoomCalcRef.current.compute(mpx, mpy, 1 / 60, Math.max(currentLevel, 1.0), followSpeed);
         ctx.drawImage(video, vp.srcX, vp.srcY, vp.srcW, vp.srcH, 0, 0, canvas.width, canvas.height);
         const cx = ((mpx - vp.srcX) / vp.srcW) * canvas.width;
         const cy = ((mpy - vp.srcY) / vp.srcH) * canvas.height;
@@ -261,8 +275,6 @@ export function PreviewCanvas({
       } else {
         ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
       }
-    } else {
-      ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
     }
 
     // Draw all active subtitles (use timeline time, not source time)
@@ -289,11 +301,7 @@ export function PreviewCanvas({
       }
     }
     subtitleBoundsRef.current = newBounds;
-  }, [videoRef, zoomConfig, zoomEnabled, findMouseEvent, clips, subtitles, selectedSubtitleIndex, drawCursor, drawStyledSubtitle, drawSelectionHandles, getCSSScale]);
-
-  useEffect(() => {
-    if (zoomCalcRef.current) zoomCalcRef.current.updateConfig(zoomConfig);
-  }, [zoomConfig]);
+  }, [videoRef, zoomSegments, captureRegion, findMouseEvent, clips, subtitles, selectedSubtitleIndex, drawCursor, drawStyledSubtitle, drawSelectionHandles, getCSSScale]);
 
   useEffect(() => { zoomCalcRef.current = null; }, [videoRef]);
 

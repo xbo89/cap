@@ -1,7 +1,7 @@
 import { useRef, useEffect, useCallback, useState } from "react";
 import { cn } from "@/lib/utils";
-import type { Clip, Subtitle } from "@/lib/ipc";
-import { ZoomIn, ZoomOut, Scissors, Plus, Trash2 } from "lucide-react";
+import type { Clip, Subtitle, ZoomSegment } from "@/lib/ipc";
+import { ZoomIn, ZoomOut, Scissors, Plus, Trash2, Focus } from "lucide-react";
 
 interface TimelineProps {
   duration: number;
@@ -13,6 +13,10 @@ interface TimelineProps {
   subtitles: Subtitle[];
   selectedSubtitleIndex: number | null;
   onSubtitleSelect: (index: number | null) => void;
+  zoomSegments: ZoomSegment[];
+  selectedZoomSegmentIndex: number | null;
+  onZoomSegmentSelect: (index: number | null) => void;
+  onZoomSegmentsChange: (segments: ZoomSegment[]) => void;
   onSeek: (time: number) => void;
   onClipsChange: (clips: Clip[]) => void;
   onSubtitlesChange: (subtitles: Subtitle[]) => void;
@@ -36,15 +40,26 @@ function videoTrackY(trackIndex: number): number {
   return RULER_HEIGHT + trackIndex * TRACK_HEIGHT;
 }
 
+/** Get zoom track Y given the number of video tracks */
+function zoomTrackY(videoTrackCount: number): number {
+  return RULER_HEIGHT + videoTrackCount * TRACK_HEIGHT;
+}
+
 /** Get subtitle track Y given the number of video tracks */
 function subtitleTrackY(videoTrackCount: number): number {
-  return RULER_HEIGHT + videoTrackCount * TRACK_HEIGHT;
+  return RULER_HEIGHT + (videoTrackCount + 1) * TRACK_HEIGHT;
 }
 
 /** Get audio track Y given the number of video tracks */
 function audioTrackY(videoTrackCount: number): number {
-  return RULER_HEIGHT + (videoTrackCount + 1) * TRACK_HEIGHT;
+  return RULER_HEIGHT + (videoTrackCount + 2) * TRACK_HEIGHT;
 }
+
+type DragType =
+  | "playhead"
+  | "clip-start" | "clip-end" | "clip-move"
+  | "subtitle-start" | "subtitle-end" | "subtitle-move"
+  | "zoom-start" | "zoom-end" | "zoom-move";
 
 export function Timeline({
   duration,
@@ -56,6 +71,10 @@ export function Timeline({
   subtitles,
   selectedSubtitleIndex,
   onSubtitleSelect,
+  zoomSegments,
+  selectedZoomSegmentIndex,
+  onZoomSegmentSelect,
+  onZoomSegmentsChange,
   onSeek,
   onClipsChange,
   onSubtitlesChange,
@@ -67,7 +86,7 @@ export function Timeline({
   const [zoom, setZoom] = useState(1);
   const [scrollLeft, setScrollLeft] = useState(0);
   const [dragging, setDragging] = useState<{
-    type: "playhead" | "clip-start" | "clip-end" | "clip-move" | "subtitle-start" | "subtitle-end" | "subtitle-move";
+    type: DragType;
     index: number;
     startX: number;
     startTime: number;
@@ -88,7 +107,7 @@ export function Timeline({
   const totalWidth = Math.max(duration * pixelsPerSecond, containerWidth);
   const videoTrackIds = getVideoTrackIds(clips);
   const videoTrackCount = videoTrackIds.length;
-  const totalTracks = videoTrackCount + 2; // + subtitle + audio
+  const totalTracks = videoTrackCount + 3; // + zoom + subtitle + audio
   const canvasHeight = RULER_HEIGHT + TRACK_HEIGHT * totalTracks + 8;
 
   const timeToX = useCallback(
@@ -199,6 +218,46 @@ export function Timeline({
       }
     }
 
+    // --- Zoom track ---
+    const zmY = zoomTrackY(videoTrackCount);
+    ctx.fillStyle = "#1a1710";
+    ctx.fillRect(0, zmY, containerWidth, TRACK_HEIGHT);
+    for (let i = 0; i < zoomSegments.length; i++) {
+      const seg = zoomSegments[i];
+      const x1 = timeToX(seg.start_time);
+      const x2 = timeToX(seg.end_time);
+      if (x2 < 0 || x1 > containerWidth) continue;
+      const isSelected = selectedZoomSegmentIndex === i;
+      ctx.fillStyle = isSelected ? "#d97706" : "#f59e0b";
+      ctx.globalAlpha = isSelected ? 0.85 : 0.65;
+      ctx.fillRect(x1, zmY + 4, x2 - x1, TRACK_HEIGHT - 8);
+      ctx.globalAlpha = 1.0;
+      if (isSelected) {
+        ctx.strokeStyle = "#fde68a";
+        ctx.lineWidth = 1.5;
+        ctx.strokeRect(x1, zmY + 4, x2 - x1, TRACK_HEIGHT - 8);
+      }
+      // Label: zoom level
+      ctx.fillStyle = "#fff";
+      ctx.font = "10px -apple-system, sans-serif";
+      ctx.textAlign = "left";
+      const textW = x2 - x1 - 8;
+      if (textW > 20) {
+        ctx.save();
+        ctx.beginPath();
+        ctx.rect(x1 + 4, zmY + 4, textW, TRACK_HEIGHT - 8);
+        ctx.clip();
+        ctx.fillText(`${seg.zoom_level.toFixed(1)}×`, x1 + 4, zmY + TRACK_HEIGHT / 2 + 3);
+        ctx.restore();
+      }
+      // Edge handles
+      ctx.fillStyle = "#fbbf24";
+      ctx.globalAlpha = 0.8;
+      ctx.fillRect(x1, zmY + 4, 3, TRACK_HEIGHT - 8);
+      ctx.fillRect(x2 - 3, zmY + 4, 3, TRACK_HEIGHT - 8);
+      ctx.globalAlpha = 1.0;
+    }
+
     // --- Subtitle track ---
     const subY = subtitleTrackY(videoTrackCount);
     ctx.fillStyle = "#18181b";
@@ -269,16 +328,17 @@ export function Timeline({
       ctx.fill();
     }
 
-    // Track labels for subtitle and audio
+    // Track labels
     ctx.fillStyle = "#52525b";
     ctx.font = "9px -apple-system, sans-serif";
     ctx.textAlign = "left";
+    ctx.fillText("ZOOM", 4, zmY + 14);
     ctx.fillText("SUBS", 4, subY + 14);
     ctx.fillText("AUDIO", 4, audioY + 14);
   }, [
     containerWidth, canvasHeight, duration, currentTime, waveform,
-    clips, subtitles, thumbnails, pixelsPerSecond, scrollLeft, timeToX, totalWidth,
-    selectedSubtitleIndex, selectedClip,
+    clips, subtitles, zoomSegments, thumbnails, pixelsPerSecond, scrollLeft, timeToX, totalWidth,
+    selectedSubtitleIndex, selectedClip, selectedZoomSegmentIndex,
   ]);
 
   // Mouse handlers
@@ -290,6 +350,41 @@ export function Timeline({
       const y = e.clientY - rect.top;
       const time = xToTime(x);
 
+      // Zoom track
+      const zmY = zoomTrackY(videoTrackCount);
+      if (y >= zmY && y < zmY + TRACK_HEIGHT) {
+        for (let i = 0; i < zoomSegments.length; i++) {
+          const seg = zoomSegments[i];
+          const x1 = timeToX(seg.start_time);
+          const x2 = timeToX(seg.end_time);
+          if (Math.abs(x - x1) < 5) {
+            onZoomSegmentSelect(i);
+            onSubtitleSelect(null);
+            setSelectedClip(null);
+            setDragging({ type: "zoom-start", index: i, startX: x, startTime: seg.start_time });
+            return;
+          }
+          if (Math.abs(x - x2) < 5) {
+            onZoomSegmentSelect(i);
+            onSubtitleSelect(null);
+            setSelectedClip(null);
+            setDragging({ type: "zoom-end", index: i, startX: x, startTime: seg.end_time });
+            return;
+          }
+          if (x >= x1 && x <= x2) {
+            onZoomSegmentSelect(i);
+            onSubtitleSelect(null);
+            setSelectedClip(null);
+            setDragging({ type: "zoom-move", index: i, startX: x, startTime: time });
+            return;
+          }
+        }
+        // Clicked empty space on zoom track — deselect
+        onZoomSegmentSelect(null);
+        onSubtitleSelect(null);
+        setPopover(null);
+      }
+
       // Subtitle track
       const subY = subtitleTrackY(videoTrackCount);
       if (y >= subY && y < subY + TRACK_HEIGHT) {
@@ -299,12 +394,14 @@ export function Timeline({
           const x2 = timeToX(sub.end_time);
           if (Math.abs(x - x1) < 5) {
             onSubtitleSelect(i);
+            onZoomSegmentSelect(null);
             setSelectedClip(null);
             setDragging({ type: "subtitle-start", index: i, startX: x, startTime: sub.start_time });
             return;
           }
           if (Math.abs(x - x2) < 5) {
             onSubtitleSelect(i);
+            onZoomSegmentSelect(null);
             setSelectedClip(null);
             setDragging({ type: "subtitle-end", index: i, startX: x, startTime: sub.end_time });
             return;
@@ -318,12 +415,14 @@ export function Timeline({
             }
             // Single click: select + drag
             onSubtitleSelect(i);
+            onZoomSegmentSelect(null);
             setSelectedClip(null);
             setDragging({ type: "subtitle-move", index: i, startX: x, startTime: time });
             return;
           }
         }
         onSubtitleSelect(null);
+        onZoomSegmentSelect(null);
         setPopover(null);
       }
 
@@ -343,18 +442,21 @@ export function Timeline({
           if (Math.abs(x - x1) < 5) {
             setSelectedClip(i);
             onSubtitleSelect(null);
+            onZoomSegmentSelect(null);
             setDragging({ type: "clip-start", index: i, startX: x, startTime: clip.start_time });
             return;
           }
           if (Math.abs(x - x2) < 5) {
             setSelectedClip(i);
             onSubtitleSelect(null);
+            onZoomSegmentSelect(null);
             setDragging({ type: "clip-end", index: i, startX: x, startTime: clip.end_time });
             return;
           }
           if (x >= x1 && x <= x2) {
             setSelectedClip(i);
             onSubtitleSelect(null);
+            onZoomSegmentSelect(null);
             setDragging({ type: "clip-move", index: i, startX: x, startTime: time });
             return;
           }
@@ -364,11 +466,12 @@ export function Timeline({
 
       // Default: seek
       onSubtitleSelect(null);
+      onZoomSegmentSelect(null);
       setPopover(null);
       onSeek(time);
       setDragging({ type: "playhead", index: 0, startX: x, startTime: time });
     },
-    [xToTime, timeToX, clips, subtitles, onSeek, onSubtitleSelect]
+    [xToTime, timeToX, clips, subtitles, zoomSegments, onSeek, onSubtitleSelect, onZoomSegmentSelect]
   );
 
   // Get sorted neighbor boundaries for overlap prevention
@@ -472,9 +575,41 @@ export function Timeline({
           setDragging({ ...dragging, startTime: time });
           break;
         }
+
+        // --- Zoom segment trimming: constrain to neighbors ---
+        case "zoom-start": {
+          const { prevEnd } = getNeighborBounds(zoomSegments, dragging.index);
+          const seg = zoomSegments[dragging.index];
+          const newStart = Math.max(prevEnd, Math.min(time, seg.end_time - MIN_DUR));
+          const nz = [...zoomSegments];
+          nz[dragging.index] = { ...seg, start_time: newStart };
+          onZoomSegmentsChange(nz);
+          break;
+        }
+        case "zoom-end": {
+          const { nextStart } = getNeighborBounds(zoomSegments, dragging.index);
+          const seg = zoomSegments[dragging.index];
+          const newEnd = Math.min(nextStart, Math.max(time, seg.start_time + MIN_DUR));
+          const nz = [...zoomSegments];
+          nz[dragging.index] = { ...seg, end_time: newEnd };
+          onZoomSegmentsChange(nz);
+          break;
+        }
+        case "zoom-move": {
+          const delta = time - dragging.startTime;
+          const seg = zoomSegments[dragging.index];
+          const dur = seg.end_time - seg.start_time;
+          const { prevEnd, nextStart } = getNeighborBounds(zoomSegments, dragging.index);
+          const newStart = Math.max(prevEnd, Math.min(seg.start_time + delta, nextStart - dur));
+          const nz = [...zoomSegments];
+          nz[dragging.index] = { ...seg, start_time: newStart, end_time: newStart + dur };
+          onZoomSegmentsChange(nz);
+          setDragging({ ...dragging, startTime: time });
+          break;
+        }
       }
     },
-    [dragging, xToTime, clips, subtitles, duration, onSeek, onClipsChange, onSubtitlesChange, getNeighborBounds]
+    [dragging, xToTime, clips, subtitles, zoomSegments, duration, onSeek, onClipsChange, onSubtitlesChange, onZoomSegmentsChange, getNeighborBounds]
   );
 
   const handleMouseUp = useCallback(() => { setDragging(null); setCanvasCursor("crosshair"); }, []);
@@ -489,6 +624,7 @@ export function Timeline({
       const y = e.clientY - rect.top;
 
       const allVideoBottom = RULER_HEIGHT + videoTrackCount * TRACK_HEIGHT;
+      const zmY = zoomTrackY(videoTrackCount);
       const subY = subtitleTrackY(videoTrackCount);
 
       // Check video tracks
@@ -499,6 +635,19 @@ export function Timeline({
           if ((clip.track_id ?? 0) !== hoverTrackId) continue;
           const x1 = timeToX(clip.start_time);
           const x2 = timeToX(clip.end_time);
+          if (Math.abs(x - x1) < 5 || Math.abs(x - x2) < 5) {
+            setCanvasCursor("col-resize"); return;
+          }
+          if (x >= x1 && x <= x2) {
+            setCanvasCursor("grab"); return;
+          }
+        }
+      }
+      // Check zoom track
+      if (y >= zmY && y < zmY + TRACK_HEIGHT) {
+        for (const seg of zoomSegments) {
+          const x1 = timeToX(seg.start_time);
+          const x2 = timeToX(seg.end_time);
           if (Math.abs(x - x1) < 5 || Math.abs(x - x2) < 5) {
             setCanvasCursor("col-resize"); return;
           }
@@ -522,7 +671,7 @@ export function Timeline({
       }
       setCanvasCursor("crosshair");
     },
-    [dragging, clips, subtitles, timeToX]
+    [dragging, clips, subtitles, zoomSegments, timeToX]
   );
 
   const handleWheel = useCallback(
@@ -554,6 +703,30 @@ export function Timeline({
     if (popover) popoverInputRef.current?.focus();
   }, [popover]);
 
+  // Add zoom segment at playhead
+  const addZoomSegment = useCallback(() => {
+    const segDuration = 3;
+    const newStart = currentTime;
+    const newEnd = Math.min(currentTime + segDuration, duration);
+
+    // Check overlap with existing segments
+    const overlaps = zoomSegments.some(s =>
+      newStart < s.end_time && newEnd > s.start_time
+    );
+    if (overlaps) return; // Don't create if it would overlap
+
+    const newSeg: ZoomSegment = {
+      start_time: newStart,
+      end_time: newEnd,
+      zoom_level: 2.0,
+      follow_speed: 0.15,
+      padding: 100,
+    };
+    const newSegs = [...zoomSegments, newSeg].sort((a, b) => a.start_time - b.start_time);
+    onZoomSegmentsChange(newSegs);
+    onZoomSegmentSelect(newSegs.findIndex(s => s.start_time === newStart));
+  }, [currentTime, duration, zoomSegments, onZoomSegmentsChange, onZoomSegmentSelect]);
+
   return (
     <div className={cn("flex flex-col", className)}>
       {/* Toolbar */}
@@ -571,12 +744,15 @@ export function Timeline({
         <button
           className={cn(
             "flex items-center gap-1 px-2 py-0.5 rounded",
-            selectedClip !== null || selectedSubtitleIndex !== null
+            selectedClip !== null || selectedSubtitleIndex !== null || selectedZoomSegmentIndex !== null
               ? "bg-destructive/20 text-destructive hover:bg-destructive/30"
               : "bg-secondary text-muted-foreground opacity-50 cursor-not-allowed"
           )}
           onClick={() => {
-            if (selectedSubtitleIndex !== null) {
+            if (selectedZoomSegmentIndex !== null) {
+              onZoomSegmentsChange(zoomSegments.filter((_, i) => i !== selectedZoomSegmentIndex));
+              onZoomSegmentSelect(null);
+            } else if (selectedSubtitleIndex !== null) {
               onSubtitlesChange(subtitles.filter((_, i) => i !== selectedSubtitleIndex));
               onSubtitleSelect(null);
             } else if (selectedClip !== null) {
@@ -584,13 +760,21 @@ export function Timeline({
               setSelectedClip(null);
             }
           }}
-          disabled={selectedClip === null && selectedSubtitleIndex === null}
+          disabled={selectedClip === null && selectedSubtitleIndex === null && selectedZoomSegmentIndex === null}
           title="Delete selected (Backspace)"
         >
           <Trash2 className="h-3 w-3" />
           Delete
         </button>
         <div className="w-px h-4 bg-border" />
+        <button
+          className="flex items-center gap-1 px-2 py-0.5 bg-secondary rounded text-muted-foreground hover:text-foreground"
+          onClick={addZoomSegment}
+          title="Add zoom segment at playhead"
+        >
+          <Focus className="h-3 w-3" />
+          Zoom
+        </button>
         <button
           className="flex items-center gap-1 px-2 py-0.5 bg-secondary rounded text-muted-foreground hover:text-foreground"
           onClick={() => {

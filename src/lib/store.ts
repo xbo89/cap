@@ -1,6 +1,5 @@
 import { create } from "zustand";
-import type { CaptureSource, SessionSummary, MouseEvent } from "./ipc";
-import { type ZoomConfig, defaultZoomConfig } from "./zoom";
+import type { CaptureSource, SessionSummary, MouseEvent, ZoomSegment } from "./ipc";
 
 type AppView = "recording" | "editor";
 
@@ -33,11 +32,11 @@ interface AppState {
   mouseEvents: MouseEvent[];
   setMouseEvents: (events: MouseEvent[]) => void;
 
-  // Zoom
-  zoomEnabled: boolean;
-  zoomConfig: ZoomConfig;
-  setZoomEnabled: (enabled: boolean) => void;
-  setZoomConfig: (config: ZoomConfig) => void;
+  // Zoom segments
+  zoomSegments: ZoomSegment[];
+  setZoomSegments: (segments: ZoomSegment[]) => void;
+  selectedZoomSegmentIndex: number | null;
+  setSelectedZoomSegmentIndex: (index: number | null) => void;
 }
 
 export const useAppStore = create<AppState>((set) => ({
@@ -64,8 +63,8 @@ export const useAppStore = create<AppState>((set) => ({
   mouseEvents: [],
   setMouseEvents: (events) => set({ mouseEvents: events }),
 
-  zoomEnabled: true,
-  zoomConfig: { ...defaultZoomConfig },
-  setZoomEnabled: (enabled) => set({ zoomEnabled: enabled }),
-  setZoomConfig: (config) => set({ zoomConfig: config }),
+  zoomSegments: [],
+  setZoomSegments: (segments) => set({ zoomSegments: segments }),
+  selectedZoomSegmentIndex: null,
+  setSelectedZoomSegmentIndex: (index) => set({ selectedZoomSegmentIndex: index }),
 }));
