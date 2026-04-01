@@ -2,6 +2,7 @@ import { useRef, useEffect, useCallback, useState } from "react";
 import { cn } from "@/lib/utils";
 import type { Clip, Subtitle, ZoomSegment } from "@/lib/ipc";
 import { Scissors, Trash2, Subtitles, Eye, Grid3X3, Maximize2, Keyboard } from "lucide-react";
+import { Tooltip, TooltipTrigger, TooltipContent } from "@/components/ui/tooltip";
 
 interface TimelineProps {
   duration: number;
@@ -21,6 +22,8 @@ interface TimelineProps {
   onClipsChange: (clips: Clip[]) => void;
   onSubtitlesChange: (subtitles: Subtitle[]) => void;
   onSplit: () => void;
+  showGrid?: boolean;
+  onShowGridChange?: (show: boolean) => void;
   className?: string;
 }
 
@@ -28,6 +31,8 @@ const TRACK_HEIGHT = 32;
 const CLIP_HEIGHT = 52; // Video clip element height
 const RULER_HEIGHT = 28;
 const TRACK_GAP = 6;
+const CANVAS_PAD_LEFT = 8; // Left padding inside canvas (avoids playhead clipping)
+const TRACK_PAD_TOP = 8;  // Space between ruler and first track
 
 /** Compute distinct sorted video track IDs from clips. Always includes track 0. */
 function getVideoTrackIds(clips: Clip[]): number[] {
@@ -39,7 +44,7 @@ function getVideoTrackIds(clips: Clip[]): number[] {
 
 /** Get Y position for a video track */
 function videoTrackY(trackIndex: number): number {
-  return RULER_HEIGHT + trackIndex * (TRACK_HEIGHT + TRACK_GAP);
+  return RULER_HEIGHT + TRACK_PAD_TOP + trackIndex * (CLIP_HEIGHT + TRACK_GAP);
 }
 
 /** Y offsets below video tracks are computed dynamically in draw code */
@@ -84,6 +89,8 @@ export function Timeline({
   onClipsChange,
   onSubtitlesChange,
   onSplit,
+  showGrid: showGridProp,
+  onShowGridChange,
   className,
 }: TimelineProps) {
   const containerRef = useRef<HTMLDivElement>(null);
@@ -99,7 +106,10 @@ export function Timeline({
   } | null>(null);
   const [selectedClip, setSelectedClip] = useState<number | null>(null);
   const [canvasCursor, setCanvasCursor] = useState("crosshair");
-  const [showGrid, setShowGrid] = useState(true);
+  // Use external grid state if provided, otherwise local fallback
+  const [localShowGrid, setLocalShowGrid] = useState(false);
+  const showGrid = showGridProp ?? localShowGrid;
+  const setShowGrid = onShowGridChange ?? setLocalShowGrid;
 
   // Popover state for double-click text edit
   const [popover, setPopover] = useState<{
@@ -126,15 +136,15 @@ export function Timeline({
   const videoTrackIds = getVideoTrackIds(clips);
   const videoTrackCount = videoTrackIds.length;
   const totalTracks = videoTrackCount + 3; // + zoom + subtitle + audio
-  const canvasHeight = Math.max(RULER_HEIGHT + (TRACK_HEIGHT + TRACK_GAP) * totalTracks + 8, containerHeight);
+  const canvasHeight = Math.max(RULER_HEIGHT + TRACK_PAD_TOP + (TRACK_HEIGHT + TRACK_GAP) * totalTracks + TRACK_PAD_TOP, containerHeight);
 
   const timeToX = useCallback(
-    (time: number) => time * pixelsPerSecond - scrollLeft,
+    (time: number) => time * pixelsPerSecond - scrollLeft + CANVAS_PAD_LEFT,
     [pixelsPerSecond, scrollLeft]
   );
 
   const xToTime = useCallback(
-    (x: number) => Math.max(0, (x + scrollLeft) / pixelsPerSecond),
+    (x: number) => Math.max(0, (x - CANVAS_PAD_LEFT + scrollLeft) / pixelsPerSecond),
     [pixelsPerSecond, scrollLeft]
   );
 
@@ -234,6 +244,7 @@ export function Timeline({
             ctx.fillStyle = isSelected ? "#5B5BD6" : "#313131";
             ctx.fillRect(innerX, innerY, innerW, innerH);
 
+            // Tile thumbnails across the inner container, preserving aspect ratio (cover style)
             const srcStart = clip.media_offset;
             const srcEnd = clip.media_offset + (clip.end_time - clip.start_time);
             const firstThumb = Math.floor(srcStart / thumbInterval) * thumbInterval;
@@ -243,8 +254,22 @@ export function Timeline({
               const tlTime = clip.start_time + (t - clip.media_offset);
               const tx = timeToX(tlTime);
               const tw = thumbInterval * pixelsPerSecond;
+
+              // "Cover" draw: scale bitmap to fill tw×innerH without stretching
+              const bmpAspect = bmp.width / bmp.height;
+              const slotAspect = tw / innerH;
+              let sx = 0, sy = 0, sw = bmp.width, sh = bmp.height;
+              if (bmpAspect > slotAspect) {
+                // Bitmap is wider — crop sides
+                sw = bmp.height * slotAspect;
+                sx = (bmp.width - sw) / 2;
+              } else {
+                // Bitmap is taller — crop top/bottom
+                sh = bmp.width / slotAspect;
+                sy = (bmp.height - sh) / 2;
+              }
               ctx.globalAlpha = 0.9;
-              ctx.drawImage(bmp, tx, innerY, tw, innerH);
+              ctx.drawImage(bmp, sx, sy, sw, sh, tx, innerY, tw, innerH);
             }
             ctx.globalAlpha = 1.0;
             ctx.restore();
@@ -281,7 +306,7 @@ export function Timeline({
 
     // Adjust Y calculation for video tracks being taller
     const videoTrackTotalHeight = videoTrackCount * (CLIP_HEIGHT + TRACK_GAP);
-    const postVideoY = RULER_HEIGHT + videoTrackTotalHeight;
+    const postVideoY = RULER_HEIGHT + TRACK_PAD_TOP + videoTrackTotalHeight;
 
     // --- Subtitle track ---
     const subY = postVideoY;
@@ -454,7 +479,7 @@ export function Timeline({
       const time = xToTime(x);
 
       const videoTrackTotalHeight = videoTrackCount * (CLIP_HEIGHT + TRACK_GAP);
-      const postVideoY = RULER_HEIGHT + videoTrackTotalHeight;
+      const postVideoY = RULER_HEIGHT + TRACK_PAD_TOP + videoTrackTotalHeight;
       const subY = postVideoY;
       const audioY = postVideoY + TRACK_HEIGHT + TRACK_GAP;
       const focusY = audioY + TRACK_HEIGHT + TRACK_GAP;
@@ -515,9 +540,9 @@ export function Timeline({
       }
 
       // Video tracks
-      const videoBottom = RULER_HEIGHT + videoTrackCount * (CLIP_HEIGHT + TRACK_GAP);
-      if (y >= RULER_HEIGHT && y < videoBottom) {
-        const clickedTrackIndex = Math.floor((y - RULER_HEIGHT) / (CLIP_HEIGHT + TRACK_GAP));
+      const videoBottom = RULER_HEIGHT + TRACK_PAD_TOP + videoTrackCount * (CLIP_HEIGHT + TRACK_GAP);
+      if (y >= RULER_HEIGHT + TRACK_PAD_TOP && y < videoBottom) {
+        const clickedTrackIndex = Math.floor((y - RULER_HEIGHT - TRACK_PAD_TOP) / (CLIP_HEIGHT + TRACK_GAP));
         const clickedTrackId = videoTrackIds[clickedTrackIndex] ?? 0;
 
         for (let i = 0; i < clips.length; i++) {
@@ -544,8 +569,8 @@ export function Timeline({
         setSelectedClip(null);
       }
 
-      // Default: seek
-      onSubtitleSelect(null); onZoomSegmentSelect(null); setPopover(null);
+      // Default: seek (keep current selection intact — only clear popover)
+      setPopover(null);
       onSeek(time);
       setDragging({ type: "playhead", index: 0, startX: x, startTime: time });
     },
@@ -687,13 +712,13 @@ export function Timeline({
       const y = e.clientY - rect.top;
 
       const videoTrackTotalHeight = videoTrackCount * (CLIP_HEIGHT + TRACK_GAP);
-      const postVideoY = RULER_HEIGHT + videoTrackTotalHeight;
+      const postVideoY = RULER_HEIGHT + TRACK_PAD_TOP + videoTrackTotalHeight;
       const subY = postVideoY;
       const audioY = postVideoY + TRACK_HEIGHT + TRACK_GAP;
       const focusY = audioY + TRACK_HEIGHT + TRACK_GAP;
 
       // Video tracks
-      if (y >= RULER_HEIGHT && y < RULER_HEIGHT + videoTrackTotalHeight) {
+      if (y >= RULER_HEIGHT + TRACK_PAD_TOP && y < RULER_HEIGHT + TRACK_PAD_TOP + videoTrackTotalHeight) {
         for (const clip of clips) {
           const x1 = timeToX(clip.start_time);
           const x2 = timeToX(clip.end_time);
@@ -777,6 +802,7 @@ export function Timeline({
         {/* Left: action buttons */}
         <div className="flex items-center gap-2">
           <ToolbarButton icon={<Scissors className="size-4" />} onClick={onSplit} title="Split (S)" />
+
           <ToolbarButton icon={<Trash2 className="size-4" />} onClick={() => {
             if (selectedZoomSegmentIndex !== null) {
               onZoomSegmentsChange(zoomSegments.filter((_, i) => i !== selectedZoomSegmentIndex));
@@ -804,7 +830,7 @@ export function Timeline({
         <div className="text-xs tracking-wider whitespace-nowrap">
           <span className="text-[#b1a9ff]">{formatTime(currentTime)}</span>
           <span className="text-[#6e6e6e] mx-2">/</span>
-          <span className="text-[#6e6e6e]">{formatTime(sourceDuration)}</span>
+          <span className="text-[#6e6e6e]">{formatTime(clips.length > 0 ? Math.max(...clips.map(c => c.end_time)) : sourceDuration)}</span>
         </div>
 
         {/* Right: view buttons */}
@@ -812,10 +838,17 @@ export function Timeline({
           <ToolbarButton
             icon={<Grid3X3 className="size-4" />}
             active={showGrid}
-            onClick={() => setShowGrid(g => !g)}
+            onClick={() => setShowGrid(!showGrid)}
             title="Toggle grid"
           />
-          <ToolbarButton icon={<Maximize2 className="size-4" />} onClick={() => setZoom(1)} title="Fit to view" />
+          <ToolbarButton icon={<Maximize2 className="size-4" />} onClick={() => {
+            // Toggle fullscreen on the document element
+            if (document.fullscreenElement) {
+              document.exitFullscreen();
+            } else {
+              document.documentElement.requestFullscreen();
+            }
+          }} title="Fullscreen" />
           <ToolbarButton icon={<Keyboard className="size-4" />} onClick={() => window.dispatchEvent(new Event("toggle-shortcuts-help"))} title="Keyboard shortcuts" />
         </div>
       </div>
@@ -842,9 +875,9 @@ export function Timeline({
           const y = e.clientY - rect.top;
           const dropTime = xToTime(x);
           let targetTrackId = 0;
-          const videoBottom = RULER_HEIGHT + videoTrackCount * (CLIP_HEIGHT + TRACK_GAP);
-          if (y >= RULER_HEIGHT && y < videoBottom) {
-            const trackIdx = Math.floor((y - RULER_HEIGHT) / (CLIP_HEIGHT + TRACK_GAP));
+          const videoBottom = RULER_HEIGHT + TRACK_PAD_TOP + videoTrackCount * (CLIP_HEIGHT + TRACK_GAP);
+          if (y >= RULER_HEIGHT + TRACK_PAD_TOP && y < videoBottom) {
+            const trackIdx = Math.floor((y - RULER_HEIGHT - TRACK_PAD_TOP) / (CLIP_HEIGHT + TRACK_GAP));
             targetTrackId = videoTrackIds[trackIdx] ?? 0;
           } else {
             targetTrackId = Math.max(...videoTrackIds, 0) + 1;
@@ -921,7 +954,7 @@ function ToolbarButton({
   active?: boolean;
   disabled?: boolean;
 }) {
-  return (
+  const btn = (
     <button
       className={cn(
         "flex items-center justify-center size-8 rounded-full backdrop-blur-[60px] transition-colors",
@@ -931,11 +964,19 @@ function ToolbarButton({
         disabled && "opacity-30 pointer-events-none"
       )}
       onClick={onClick}
-      title={title}
       disabled={disabled}
     >
       {icon}
     </button>
+  );
+
+  if (!title) return btn;
+
+  return (
+    <Tooltip>
+      <TooltipTrigger asChild>{btn}</TooltipTrigger>
+      <TooltipContent>{title}</TooltipContent>
+    </Tooltip>
   );
 }
 

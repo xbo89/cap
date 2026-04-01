@@ -106,6 +106,9 @@ export interface ZoomSegment {
   zoom_level: number;
   follow_speed: number;
   padding: number;
+  follow_mouse?: boolean;  // false = anchored (default), true = slow follow
+  anchor_x?: number;       // anchored zoom focus X (screen coords)
+  anchor_y?: number;       // anchored zoom focus Y (screen coords)
 }
 
 export interface ZoomEffectConfig {

@@ -65,6 +65,40 @@ export function ZoomSettings({ segment, onSegmentChange }: ZoomSettingsProps) {
         displayValue={`${segment.padding}px`}
         onChange={(v) => update({ padding: v })}
       />
+
+      {/* Follow Mouse toggle */}
+      <div className="flex items-center justify-between pt-1">
+        <span className="text-xs text-[#6e6e6e]">Follow Mouse</span>
+        <button
+          className={`relative w-8 h-[18px] rounded-full transition-colors ${
+            segment.follow_mouse ? "bg-[#5b5bd6]" : "bg-white/10"
+          }`}
+          onClick={() => update({ follow_mouse: !segment.follow_mouse })}
+        >
+          <span
+            className={`absolute top-[2px] h-[14px] w-[14px] rounded-full bg-white transition-transform ${
+              segment.follow_mouse ? "translate-x-[14px]" : "translate-x-[2px]"
+            }`}
+          />
+        </button>
+      </div>
+      {segment.follow_mouse && (
+        <Slider
+          label="Follow Speed"
+          value={segment.follow_speed}
+          min={0.01}
+          max={0.15}
+          step={0.005}
+          displayValue={
+            segment.follow_speed <= 0.03
+              ? "Very Slow"
+              : segment.follow_speed <= 0.07
+              ? "Slow"
+              : "Moderate"
+          }
+          onChange={(v) => update({ follow_speed: v })}
+        />
+      )}
     </div>
   );
 }

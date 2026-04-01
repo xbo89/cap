@@ -2,7 +2,8 @@ import { useEffect, useRef, useCallback, useState } from "react";
 import { listen } from "@tauri-apps/api/event";
 import { useAppStore } from "@/lib/store";
 import { ipc } from "@/lib/ipc";
-import type { Clip, Subtitle, SubtitleStyle, ZoomSegment, CaptureRegion } from "@/lib/ipc";
+import type { Clip, Subtitle, SubtitleStyle, ZoomSegment, CaptureRegion, MouseEvent as MouseEventData } from "@/lib/ipc";
+import { HistoryManager } from "@/lib/history";
 import { PreviewCanvas } from "@/components/recording/PreviewCanvas";
 import { ZoomSettings } from "@/components/zoom/ZoomSettings";
 import { SubtitleProperties } from "@/components/subtitle/SubtitleProperties";
@@ -11,8 +12,73 @@ import { ExportPanel } from "@/components/export/ExportPanel";
 import { useKeyboard } from "@/hooks/useKeyboard";
 import { videoUrl } from "@/lib/video-url";
 import { useThumbnails } from "@/hooks/useThumbnails";
-import { Settings, Save, Check, Play, Pause, FolderOpen } from "lucide-react";
+import { Film, Save, Check, Play, Pause, FolderOpen } from "lucide-react";
+import { Tooltip, TooltipTrigger, TooltipContent } from "@/components/ui/tooltip";
 import { ScrollArea } from "@/components/ui/scroll-area";
+
+/**
+ * Detect clean single-clicks from mouse events and generate zoom segments.
+ * Filters out: rapid clicks (<500ms apart), long presses (>200ms hold).
+ */
+function generateZoomFromClicks(events: MouseEventData[], duration: number): ZoomSegment[] {
+  if (events.length === 0) return [];
+
+  // Find click-down transitions (buttons 0→1)
+  const clicks: { time: number; x: number; y: number }[] = [];
+  for (let i = 1; i < events.length; i++) {
+    const prev = events[i - 1];
+    const curr = events[i];
+    // Left button press (0 → has bit 1)
+    if ((prev.buttons & 1) === 0 && (curr.buttons & 1) === 1) {
+      const timeSec = curr.timestamp_us / 1_000_000;
+      // Find release: next frame where button goes back to 0
+      let releaseIdx = i + 1;
+      while (releaseIdx < events.length && (events[releaseIdx].buttons & 1) === 1) {
+        releaseIdx++;
+      }
+      const holdDurationMs = releaseIdx < events.length
+        ? (events[releaseIdx].timestamp_us - curr.timestamp_us) / 1000
+        : 999;
+
+      // Filter: skip long presses (>200ms hold = likely drag)
+      if (holdDurationMs <= 200) {
+        clicks.push({ time: timeSec, x: curr.x, y: curr.y });
+      }
+    }
+  }
+
+  // Filter: skip rapid clicks (<500ms apart, keep first)
+  const filtered: typeof clicks = [];
+  for (const click of clicks) {
+    const last = filtered[filtered.length - 1];
+    if (!last || (click.time - last.time) >= 0.5) {
+      filtered.push(click);
+    }
+  }
+
+  // Generate zoom segments with anchored focus
+  const segments: ZoomSegment[] = [];
+  for (const click of filtered) {
+    const start = Math.max(0, click.time - 0.3);
+    const end = Math.min(duration, click.time + 1.5);
+    // Skip if overlaps with previous segment
+    const prev = segments[segments.length - 1];
+    if (prev && start < prev.end_time) continue;
+
+    segments.push({
+      start_time: start,
+      end_time: end,
+      zoom_level: 2.0,
+      follow_speed: 0.15,
+      padding: 100,
+      follow_mouse: false,
+      anchor_x: click.x,
+      anchor_y: click.y,
+    });
+  }
+
+  return segments;
+}
 
 export function EditorView() {
   const {
@@ -35,6 +101,7 @@ export function EditorView() {
   const [selectedSubtitleIndex, setSelectedSubtitleIndex] = useState<number | null>(null);
   const [captureRegion, setCaptureRegion] = useState<CaptureRegion | null>(null);
   const [saveStatus, setSaveStatus] = useState<"idle" | "saving" | "saved">("idle");
+  const [showGrid, setShowGrid] = useState(false);
   const [timelineHeight, setTimelineHeight] = useState(260);
   const timelineDragRef = useRef<{ startY: number; startH: number } | null>(null);
   const videoRef = useRef<HTMLVideoElement>(null);
@@ -46,6 +113,48 @@ export function EditorView() {
   currentTimeRef.current = currentTime;
 
   const sessionId = currentSession?.session_id;
+
+  // --- Undo/Redo ---
+  const historyRef = useRef(new HistoryManager());
+  const historyPushTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const isRestoringRef = useRef(false); // prevent re-pushing during undo/redo restore
+
+  // Push snapshot when clips/subtitles/zoomSegments change (debounced 300ms)
+  useEffect(() => {
+    if (isRestoringRef.current) return; // skip push during undo/redo
+    if (clips.length === 0 && subtitles.length === 0 && zoomSegments.length === 0) return;
+    if (historyPushTimer.current) clearTimeout(historyPushTimer.current);
+    historyPushTimer.current = setTimeout(() => {
+      historyRef.current.push({ clips, subtitles, zoomSegments });
+    }, 300);
+    return () => { if (historyPushTimer.current) clearTimeout(historyPushTimer.current); };
+  }, [clips, subtitles, zoomSegments]);
+
+  const handleUndo = useCallback(() => {
+    const snapshot = historyRef.current.undo();
+    if (!snapshot) return;
+    isRestoringRef.current = true;
+    setClips(snapshot.clips);
+    setSubtitles(snapshot.subtitles);
+    setZoomSegments(snapshot.zoomSegments);
+    // Reset flag after React processes the state updates
+    requestAnimationFrame(() => { isRestoringRef.current = false; });
+  }, [setZoomSegments]);
+
+  const handleRedo = useCallback(() => {
+    const snapshot = historyRef.current.redo();
+    if (!snapshot) return;
+    isRestoringRef.current = true;
+    setClips(snapshot.clips);
+    setSubtitles(snapshot.subtitles);
+    setZoomSegments(snapshot.zoomSegments);
+    requestAnimationFrame(() => { isRestoringRef.current = false; });
+  }, [setZoomSegments]);
+
+  // Clear history when session changes
+  useEffect(() => {
+    historyRef.current.clear();
+  }, [sessionId]);
 
   // Dynamic timeline duration: expand beyond source when clips are moved
   const timelineDuration = Math.max(
@@ -104,16 +213,17 @@ export function EditorView() {
     setZoomSegments([]);
     setMouseEvents([]);
 
-    // Load new session data — use Promise.all for duration + project to avoid race conditions
-    ipc.getMouseMetadata(sessionId).then(setMouseEvents).catch(console.error);
+    // Load new session data — all in one Promise.all to enable auto-zoom from clicks
     ipc.getCaptureRegion(sessionId).then(setCaptureRegion).catch(console.error);
     ipc.getWaveform(sessionId, 100).then(setWaveform).catch(console.error);
 
     Promise.all([
       ipc.getVideoDuration(sessionId),
       ipc.loadProject(sessionId),
-    ]).then(([d, project]) => {
+      ipc.getMouseMetadata(sessionId),
+    ]).then(([d, project, events]) => {
       setDuration(d);
+      setMouseEvents(events);
 
       if (project) {
         setClips(project.clips.map(c => ({
@@ -140,6 +250,12 @@ export function EditorView() {
       } else {
         // No saved project — create default clip spanning full video
         setClips([{ start_time: 0, end_time: d, media_offset: 0 }]);
+
+        // Auto-generate zoom segments from mouse clicks
+        const autoZooms = generateZoomFromClicks(events, d);
+        if (autoZooms.length > 0) {
+          setZoomSegments(autoZooms);
+        }
       }
     }).catch(console.error);
   }, [sessionId, setMouseEvents, setZoomSegments, setSelectedZoomSegmentIndex]);
@@ -370,6 +486,8 @@ export function EditorView() {
     { key: " ", action: togglePlay },
     { key: "s", action: handleSplit },
     { key: "s", meta: true, action: handleSave },
+    { key: "z", meta: true, action: handleUndo },
+    { key: "z", meta: true, shift: true, action: handleRedo },
     { key: "e", meta: true, action: () => setShowExport(true) },
     {
       key: "Backspace",
@@ -448,38 +566,55 @@ export function EditorView() {
 
           {/* Right: action buttons */}
           <div className="flex items-center gap-2">
-            <button
-              className="flex items-center justify-center size-9 rounded-full border border-white/[0.08] hover:bg-white/[0.06] transition-colors"
-              onClick={() => sessionId && ipc.showInFinder(sessionId)}
-              title="Show in Finder"
-            >
-              <FolderOpen className="size-4 text-white/70" />
-            </button>
-            <button
-              className="flex items-center justify-center size-9 rounded-full border border-white/[0.08] hover:bg-white/[0.06] transition-colors"
-              onClick={() => ipc.showSessionsBrowser()}
-              title="Settings"
-            >
-              <Settings className="size-4 text-white/70" />
-            </button>
-            <button
-              className="flex items-center justify-center size-9 rounded-full border border-white/[0.08] hover:bg-white/[0.06] transition-colors"
-              onClick={handleSave}
-              disabled={saveStatus === "saving"}
-              title="Save"
-            >
-              {saveStatus === "saved" ? (
-                <Check className="size-4 text-green-400" />
-              ) : (
-                <Save className="size-4 text-white/70" />
-              )}
-            </button>
-            <button
-              className="flex items-center justify-center h-9 px-5 rounded-full bg-[#5b5bd6] hover:bg-[#6e6ede] text-white text-sm transition-colors"
-              onClick={() => setShowExport(true)}
-            >
-              Export
-            </button>
+            <Tooltip>
+              <TooltipTrigger asChild>
+                <button
+                  className="flex items-center justify-center size-9 rounded-full border border-white/[0.08] hover:bg-white/[0.06] transition-colors"
+                  onClick={() => sessionId && ipc.showInFinder(sessionId)}
+                >
+                  <FolderOpen className="size-4 text-white/70" />
+                </button>
+              </TooltipTrigger>
+              <TooltipContent>Show in Finder</TooltipContent>
+            </Tooltip>
+            <Tooltip>
+              <TooltipTrigger asChild>
+                <button
+                  className="flex items-center justify-center size-9 rounded-full border border-white/[0.08] hover:bg-white/[0.06] transition-colors"
+                  onClick={() => ipc.showSessionsBrowser()}
+                >
+                  <Film className="size-4 text-white/70" />
+                </button>
+              </TooltipTrigger>
+              <TooltipContent>Recordings</TooltipContent>
+            </Tooltip>
+            <Tooltip>
+              <TooltipTrigger asChild>
+                <button
+                  className="flex items-center justify-center size-9 rounded-full border border-white/[0.08] hover:bg-white/[0.06] transition-colors"
+                  onClick={handleSave}
+                  disabled={saveStatus === "saving"}
+                >
+                  {saveStatus === "saved" ? (
+                    <Check className="size-4 text-green-400" />
+                  ) : (
+                    <Save className="size-4 text-white/70" />
+                  )}
+                </button>
+              </TooltipTrigger>
+              <TooltipContent>Save (&#8984;S)</TooltipContent>
+            </Tooltip>
+            <Tooltip>
+              <TooltipTrigger asChild>
+                <button
+                  className="flex items-center justify-center h-9 px-5 rounded-full bg-[#5b5bd6] hover:bg-[#6e6ede] text-white text-sm transition-colors"
+                  onClick={() => setShowExport(true)}
+                >
+                  Export
+                </button>
+              </TooltipTrigger>
+              <TooltipContent>Export video (&#8984;E)</TooltipContent>
+            </Tooltip>
           </div>
         </div>
 
@@ -503,6 +638,7 @@ export function EditorView() {
                 selectedSubtitleIndex={selectedSubtitleIndex}
                 onSubtitleSelect={handleSubtitleSelect}
                 onSubtitleStyleChange={handleSubtitleStyleChange}
+                showGrid={showGrid}
                 width={1920}
                 height={1080}
               />
@@ -572,6 +708,8 @@ export function EditorView() {
             onClipsChange={setClips}
             onSubtitlesChange={setSubtitles}
             onSplit={handleSplit}
+            showGrid={showGrid}
+            onShowGridChange={setShowGrid}
           />
         </div>
       </div>

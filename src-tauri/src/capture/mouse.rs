@@ -10,7 +10,7 @@ pub struct MouseEvent {
     pub x: f64,
     /// Mouse Y position (screen coordinates)
     pub y: f64,
-    /// Mouse button state (0 = none, 1 = left, 2 = right)
+    /// Mouse button state (0 = none, 1 = left, 2 = right, 3 = both)
     pub buttons: u8,
 }
 
@@ -29,7 +29,7 @@ impl MouseTracker {
         }
     }
 
-    /// Start tracking mouse position by polling
+    /// Start tracking mouse position and button state by polling
     pub fn start(&mut self) {
         self.start_time = Instant::now();
         *self.running.lock().unwrap() = true;
@@ -40,13 +40,14 @@ impl MouseTracker {
 
         std::thread::spawn(move || {
             while *running.lock().unwrap() {
-                let pos = get_cursor_position();
+                let (x, y) = get_cursor_position();
+                let buttons = get_mouse_buttons();
                 let elapsed = start_time.elapsed();
                 let event = MouseEvent {
                     timestamp_us: elapsed.as_micros() as u64,
-                    x: pos.0,
-                    y: pos.1,
-                    buttons: 0,
+                    x,
+                    y,
+                    buttons,
                 };
                 events.lock().unwrap().push(event);
                 // Poll at ~120Hz for smooth tracking
@@ -80,5 +81,26 @@ fn get_cursor_position() -> (f64, f64) {
     #[cfg(not(target_os = "macos"))]
     {
         (0.0, 0.0)
+    }
+}
+
+/// Get current mouse button state using CoreGraphics C API
+fn get_mouse_buttons() -> u8 {
+    #[cfg(target_os = "macos")]
+    {
+        extern "C" {
+            fn CGEventSourceButtonState(stateID: u32, button: u32) -> bool;
+        }
+        let mut buttons: u8 = 0;
+        unsafe {
+            // CGEventSourceStateID::CombinedSessionState = 0
+            if CGEventSourceButtonState(0, 0) { buttons |= 1; } // Left button = 0
+            if CGEventSourceButtonState(0, 1) { buttons |= 2; } // Right button = 1
+        }
+        buttons
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        0
     }
 }

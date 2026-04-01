@@ -638,7 +638,8 @@ pub fn show_sessions_browser(app: AppHandle) -> Result<(), String> {
     .resizable(true)
     .title_bar_style(tauri::TitleBarStyle::Overlay)
     .hidden_title(true)
-    .traffic_light_position(tauri::LogicalPosition::new(13.0, 9.0))
+    .traffic_light_position(tauri::LogicalPosition::new(13.0, 15.0))
+    .accept_first_mouse(true)
     .build()
     .map_err(|e| format!("Failed to create sessions browser: {}", e))?;
 

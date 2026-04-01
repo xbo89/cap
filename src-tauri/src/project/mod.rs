@@ -80,6 +80,12 @@ pub struct ZoomSegment {
     pub zoom_level: f64,
     pub follow_speed: f64,
     pub padding: f64,
+    #[serde(default)]
+    pub follow_mouse: Option<bool>,
+    #[serde(default)]
+    pub anchor_x: Option<f64>,
+    #[serde(default)]
+    pub anchor_y: Option<f64>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -116,6 +122,9 @@ impl ZoomEffect {
                         zoom_level,
                         follow_speed,
                         padding,
+                        follow_mouse: None,
+                        anchor_x: None,
+                        anchor_y: None,
                     }]
                 } else {
                     vec![]

@@ -21,6 +21,7 @@ interface PreviewCanvasProps {
   selectedSubtitleIndex: number | null;
   onSubtitleSelect: (index: number | null) => void;
   onSubtitleStyleChange: (index: number, style: SubtitleStyle) => void;
+  showGrid?: boolean;
   width?: number;
   height?: number;
 }
@@ -39,6 +40,7 @@ export function PreviewCanvas({
   selectedSubtitleIndex,
   onSubtitleSelect,
   onSubtitleStyleChange,
+  showGrid = false,
   width = 640,
   height = 360,
 }: PreviewCanvasProps) {
@@ -158,35 +160,35 @@ export function PreviewCanvas({
 
     // Dashed selection border
     ctx.strokeStyle = "#3b82f6";
-    ctx.lineWidth = 1.5;
-    ctx.setLineDash([4, 3]);
+    ctx.lineWidth = 2.5;
+    ctx.setLineDash([6, 4]);
     ctx.strokeRect(-hw, -hh, hw * 2, hh * 2);
     ctx.setLineDash([]);
 
     // Corner + midpoint handles
-    const handleSize = 6;
+    const handleSize = 10;
     const positions = [
       [-hw, -hh], [hw, -hh], [-hw, hh], [hw, hh], // corners
       [0, -hh], [0, hh], [-hw, 0], [hw, 0],        // midpoints
     ];
     ctx.fillStyle = "#ffffff";
     ctx.strokeStyle = "#3b82f6";
-    ctx.lineWidth = 1.5;
+    ctx.lineWidth = 2;
     for (const [px, py] of positions) {
       ctx.fillRect(px - handleSize / 2, py - handleSize / 2, handleSize, handleSize);
       ctx.strokeRect(px - handleSize / 2, py - handleSize / 2, handleSize, handleSize);
     }
 
     // Rotation handle
-    const rotY = -hh - 24;
+    const rotY = -hh - 28;
     ctx.beginPath();
     ctx.moveTo(0, -hh);
     ctx.lineTo(0, rotY);
     ctx.strokeStyle = "#3b82f6";
-    ctx.lineWidth = 1;
+    ctx.lineWidth = 1.5;
     ctx.stroke();
     ctx.beginPath();
-    ctx.arc(0, rotY, 5, 0, Math.PI * 2);
+    ctx.arc(0, rotY, 7, 0, Math.PI * 2);
     ctx.fillStyle = "#3b82f6";
     ctx.fill();
 
@@ -196,13 +198,15 @@ export function PreviewCanvas({
   // Draw cursor indicator
   const drawCursor = useCallback((ctx: CanvasRenderingContext2D, x: number, y: number) => {
     ctx.save();
+    // Outer ring
     ctx.beginPath();
-    ctx.arc(x, y, 8, 0, Math.PI * 2);
+    ctx.arc(x, y, 16, 0, Math.PI * 2);
     ctx.strokeStyle = "rgba(255, 255, 255, 0.9)";
-    ctx.lineWidth = 2;
+    ctx.lineWidth = 3;
     ctx.stroke();
+    // Inner dot
     ctx.beginPath();
-    ctx.arc(x, y, 3, 0, Math.PI * 2);
+    ctx.arc(x, y, 6, 0, Math.PI * 2);
     ctx.fillStyle = "rgba(255, 255, 255, 0.9)";
     ctx.fill();
     ctx.restore();
@@ -267,7 +271,13 @@ export function PreviewCanvas({
         const regionY = captureRegion?.y ?? 0;
         const mpx = (mouseEvent.x - regionX) * sf;
         const mpy = (mouseEvent.y - regionY) * sf;
-        const vp = zoomCalcRef.current.compute(mpx, mpy, 1 / 60, Math.max(currentLevel, 1.0), followSpeed);
+        // Build anchor position if segment uses fixed focus (follow_mouse = false or default)
+        const useAnchor = activeSeg && !activeSeg.follow_mouse && activeSeg.anchor_x != null && activeSeg.anchor_y != null;
+        const anchorPos = useAnchor ? {
+          x: ((activeSeg!.anchor_x! - (captureRegion?.x ?? 0)) * sf),
+          y: ((activeSeg!.anchor_y! - (captureRegion?.y ?? 0)) * sf),
+        } : undefined;
+        const vp = zoomCalcRef.current.compute(mpx, mpy, 1 / 60, Math.max(currentLevel, 1.0), followSpeed, anchorPos);
         ctx.drawImage(video, vp.srcX, vp.srcY, vp.srcW, vp.srcH, 0, 0, canvas.width, canvas.height);
         const cx = ((mpx - vp.srcX) / vp.srcW) * canvas.width;
         const cy = ((mpy - vp.srcY) / vp.srcH) * canvas.height;
@@ -275,6 +285,24 @@ export function PreviewCanvas({
       } else {
         ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
       }
+    }
+
+    // Draw 3x3 grid overlay if enabled
+    if (showGrid) {
+      ctx.save();
+      ctx.strokeStyle = "rgba(255, 255, 255, 0.3)";
+      ctx.lineWidth = 1;
+      const cw = canvas.width;
+      const ch = canvas.height;
+      // Vertical lines at 1/3 and 2/3
+      ctx.beginPath();
+      ctx.moveTo(cw / 3, 0); ctx.lineTo(cw / 3, ch);
+      ctx.moveTo((cw * 2) / 3, 0); ctx.lineTo((cw * 2) / 3, ch);
+      // Horizontal lines at 1/3 and 2/3
+      ctx.moveTo(0, ch / 3); ctx.lineTo(cw, ch / 3);
+      ctx.moveTo(0, (ch * 2) / 3); ctx.lineTo(cw, (ch * 2) / 3);
+      ctx.stroke();
+      ctx.restore();
     }
 
     // Draw all active subtitles (use timeline time, not source time)
@@ -301,7 +329,7 @@ export function PreviewCanvas({
       }
     }
     subtitleBoundsRef.current = newBounds;
-  }, [videoRef, zoomSegments, captureRegion, findMouseEvent, clips, subtitles, selectedSubtitleIndex, drawCursor, drawStyledSubtitle, drawSelectionHandles, getCSSScale]);
+  }, [videoRef, zoomSegments, captureRegion, findMouseEvent, clips, subtitles, selectedSubtitleIndex, showGrid, drawCursor, drawStyledSubtitle, drawSelectionHandles, getCSSScale]);
 
   useEffect(() => { zoomCalcRef.current = null; }, [videoRef]);
 
@@ -387,7 +415,7 @@ export function PreviewCanvas({
 
           // Rotation handle
           const rotY = cyN - hh - 24;
-          if (Math.hypot(cssX - cxN, cssY - rotY) < 10) return { index: selectedSubtitleIndex, handle: "rotate" };
+          if (Math.hypot(cssX - cxN, cssY - rotY) < 14) return { index: selectedSubtitleIndex, handle: "rotate" };
 
           // Corner handles
           const corners: [number, number, HandleType][] = [
@@ -395,7 +423,7 @@ export function PreviewCanvas({
             [cxN - hw, cyN + hh, "bl"], [cxN + hw, cyN + hh, "br"],
           ];
           for (const [hx, hy, ht] of corners) {
-            if (Math.abs(cssX - hx) < 8 && Math.abs(cssY - hy) < 8) return { index: selectedSubtitleIndex, handle: ht };
+            if (Math.abs(cssX - hx) < 12 && Math.abs(cssY - hy) < 12) return { index: selectedSubtitleIndex, handle: ht };
           }
 
           // Midpoint handles
@@ -404,7 +432,7 @@ export function PreviewCanvas({
             [cxN - hw, cyN, "l"], [cxN + hw, cyN, "r"],
           ];
           for (const [hx, hy, ht] of mids) {
-            if (Math.abs(cssX - hx) < 8 && Math.abs(cssY - hy) < 8) return { index: selectedSubtitleIndex, handle: ht };
+            if (Math.abs(cssX - hx) < 12 && Math.abs(cssY - hy) < 12) return { index: selectedSubtitleIndex, handle: ht };
           }
         }
       }

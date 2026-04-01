@@ -2,6 +2,7 @@ import { useState, useEffect, useCallback } from "react";
 import { emit } from "@tauri-apps/api/event";
 import { ipc, type SessionInfo } from "@/lib/ipc";
 import { Trash2, FolderOpen } from "lucide-react";
+import { ScrollArea } from "@/components/ui/scroll-area";
 
 interface SessionSidebarProps {
   currentSessionId?: string;
@@ -61,91 +62,100 @@ export function SessionSidebar({ currentSessionId, onOpenSession, standalone }: 
     return `${m}:${s.toString().padStart(2, "0")}`;
   };
 
-  return (
-    <div className={`${standalone ? "w-full h-full" : "w-64 border-r border-border"} flex flex-col bg-background`}>
-      <div className="px-3 py-2 border-b border-border">
-        <h3 className="text-sm font-medium text-foreground">Recordings</h3>
-        <p className="text-xs text-muted-foreground mt-0.5">{sessions.length} sessions</p>
-      </div>
+  const listContent = (
+    <>
+      {loading && (
+        <div className="p-4 text-sm text-muted-foreground text-center">Loading...</div>
+      )}
 
-      <div className="flex-1 overflow-y-auto">
-        {loading && (
-          <div className="p-4 text-sm text-muted-foreground text-center">Loading...</div>
-        )}
+      {!loading && sessions.length === 0 && (
+        <div className="p-4 text-sm text-muted-foreground text-center">No recordings yet</div>
+      )}
 
-        {!loading && sessions.length === 0 && (
-          <div className="p-4 text-sm text-muted-foreground text-center">No recordings yet</div>
-        )}
+      {sessions.map((session) => {
+        const isCurrent = session.session_id === currentSessionId;
+        const thumbUrl = session.thumbnail_path
+          ? `stream://localhost/${encodeURIComponent(session.thumbnail_path)}`
+          : undefined;
 
-        {sessions.map((session) => {
-          const isCurrent = session.session_id === currentSessionId;
-          const thumbUrl = session.thumbnail_path
-            ? `stream://localhost/${encodeURIComponent(session.thumbnail_path)}`
-            : undefined;
+        return (
+          <div
+            key={session.session_id}
+            className={`group flex items-start gap-2 px-3 py-2 border-b border-white/[0.06] hover:bg-white/[0.04] cursor-pointer ${
+              isCurrent ? "bg-white/[0.06]" : ""
+            }`}
+            onClick={() => {
+              if (onOpenSession) {
+                onOpenSession(session.session_id);
+              } else {
+                emit("open-session", { session_id: session.session_id });
+              }
+            }}
+          >
+            {/* Thumbnail */}
+            <div className="w-16 h-10 rounded bg-muted flex-shrink-0 overflow-hidden">
+              {thumbUrl ? (
+                <img src={thumbUrl} className="w-full h-full object-cover" alt="" />
+              ) : (
+                <div className="w-full h-full bg-muted-foreground/10" />
+              )}
+            </div>
 
-          return (
-            <div
-              key={session.session_id}
-              className={`group flex items-start gap-2 px-3 py-2 border-b border-border/50 hover:bg-accent/50 cursor-pointer ${
-                isCurrent ? "bg-accent" : ""
-              }`}
-              onClick={() => {
-                if (onOpenSession) {
-                  onOpenSession(session.session_id);
-                } else {
-                  emit("open-session", { session_id: session.session_id });
-                }
-              }}
-            >
-              {/* Thumbnail */}
-              <div className="w-16 h-10 rounded bg-muted flex-shrink-0 overflow-hidden">
-                {thumbUrl ? (
-                  <img src={thumbUrl} className="w-full h-full object-cover" alt="" />
-                ) : (
-                  <div className="w-full h-full bg-muted-foreground/10" />
-                )}
+            {/* Info */}
+            <div className="flex-1 min-w-0">
+              <div className="text-xs text-foreground truncate">
+                {formatDuration(session.duration_secs)} &middot; {session.file_size_mb.toFixed(1)} MB
               </div>
-
-              {/* Info */}
-              <div className="flex-1 min-w-0">
-                <div className="text-xs text-foreground truncate">
-                  {formatDuration(session.duration_secs)} &middot; {session.file_size_mb.toFixed(1)} MB
-                </div>
-                <div className="text-[10px] text-muted-foreground mt-0.5">
-                  {formatDate(session.created_at)}
-                </div>
-              </div>
-
-              {/* Actions */}
-              <div className="flex items-center gap-0.5 opacity-0 group-hover:opacity-100 transition-opacity">
-                <button
-                  className="p-1 text-muted-foreground hover:text-foreground hover:bg-accent rounded"
-                  onClick={(e) => { e.stopPropagation(); ipc.showInFinder(session.session_id); }}
-                  title="Open in Finder"
-                >
-                  <FolderOpen className="h-3 w-3" />
-                </button>
-                {confirmDelete === session.session_id ? (
-                  <button
-                    className="p-1 text-red-500 hover:bg-red-500/10 rounded text-[10px] font-medium"
-                    onClick={(e) => { e.stopPropagation(); handleDelete(session.session_id); }}
-                  >
-                    Confirm
-                  </button>
-                ) : (
-                  <button
-                    className="p-1 text-muted-foreground hover:text-red-500 hover:bg-red-500/10 rounded"
-                    onClick={(e) => { e.stopPropagation(); setConfirmDelete(session.session_id); }}
-                    title="Delete"
-                  >
-                    <Trash2 className="h-3 w-3" />
-                  </button>
-                )}
+              <div className="text-[10px] text-muted-foreground mt-0.5">
+                {formatDate(session.created_at)}
               </div>
             </div>
-          );
-        })}
-      </div>
+
+            {/* Actions */}
+            <div className="flex items-center gap-0.5 opacity-0 group-hover:opacity-100 transition-opacity">
+              <button
+                className="p-1 text-muted-foreground hover:text-foreground hover:bg-white/[0.06] rounded"
+                onClick={(e) => { e.stopPropagation(); ipc.showInFinder(session.session_id); }}
+                title="Open in Finder"
+              >
+                <FolderOpen className="h-3 w-3" />
+              </button>
+              {confirmDelete === session.session_id ? (
+                <button
+                  className="p-1 text-red-500 hover:bg-red-500/10 rounded text-[10px] font-medium"
+                  onClick={(e) => { e.stopPropagation(); handleDelete(session.session_id); }}
+                >
+                  Confirm
+                </button>
+              ) : (
+                <button
+                  className="p-1 text-muted-foreground hover:text-red-500 hover:bg-red-500/10 rounded"
+                  onClick={(e) => { e.stopPropagation(); setConfirmDelete(session.session_id); }}
+                  title="Delete"
+                >
+                  <Trash2 className="h-3 w-3" />
+                </button>
+              )}
+            </div>
+          </div>
+        );
+      })}
+    </>
+  );
+
+  return (
+    <div className={`${standalone ? "w-full h-full bg-transparent" : "w-64 border-r border-border bg-background"} flex flex-col`}>
+      {/* Header — only shown in inline mode; standalone mode has its own header */}
+      {!standalone && (
+        <div className="px-3 py-2 border-b border-border">
+          <h3 className="text-sm font-medium text-foreground">Recordings</h3>
+          <p className="text-xs text-muted-foreground mt-0.5">{sessions.length} sessions</p>
+        </div>
+      )}
+
+      <ScrollArea className="flex-1">
+        {listContent}
+      </ScrollArea>
     </div>
   );
 }

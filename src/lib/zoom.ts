@@ -14,13 +14,9 @@ export interface ZoomConfig {
   padding: number;
 }
 
-export interface ZoomSegment {
-  start_time: number;
-  end_time: number;
-  zoom_level: number;
-  follow_speed: number;
-  padding: number;
-}
+// Import and re-export from ipc to keep a single source of truth
+import type { ZoomSegment } from "./ipc";
+export type { ZoomSegment };
 
 export interface Viewport {
   srcX: number;
@@ -108,17 +104,25 @@ export class ZoomCalculator {
    * @param zoomLevel Current (spring-interpolated) zoom level
    * @param followSpeed Follow speed for exponential smoothing
    */
-  compute(mouseX: number, mouseY: number, dt: number, zoomLevel: number, followSpeed: number): Viewport {
+  /**
+   * @param anchorPos If provided, zoom anchors to this fixed point (no mouse follow).
+   */
+  compute(mouseX: number, mouseY: number, dt: number, zoomLevel: number, followSpeed: number, anchorPos?: { x: number; y: number }): Viewport {
+    // Determine focus point: anchor or mouse
+    const focusX = anchorPos ? anchorPos.x : mouseX;
+    const focusY = anchorPos ? anchorPos.y : mouseY;
+
     if (!this.initialized) {
-      this.centerX = mouseX;
-      this.centerY = mouseY;
+      this.centerX = focusX;
+      this.centerY = focusY;
       this.initialized = true;
     }
 
     // Exponential smoothing - must match Rust: alpha = 1 - e^(-followSpeed * dt * 60)
-    const alpha = 1.0 - Math.exp(-followSpeed * dt * 60.0);
-    this.centerX += (mouseX - this.centerX) * alpha;
-    this.centerY += (mouseY - this.centerY) * alpha;
+    const speed = anchorPos ? Math.min(followSpeed, 0.03) : followSpeed; // anchored = very slow transition
+    const alpha = 1.0 - Math.exp(-speed * dt * 60.0);
+    this.centerX += (focusX - this.centerX) * alpha;
+    this.centerY += (focusY - this.centerY) * alpha;
 
     // Viewport size
     const vw = this.frameWidth / zoomLevel;

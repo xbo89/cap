@@ -5,6 +5,7 @@ import { ipc, type SessionSummary } from "@/lib/ipc";
 import { RecordingControls } from "@/components/recording/RecordingControls";
 import { EditorView } from "@/components/editor/EditorView";
 import { ShortcutsHelp } from "@/components/ui/shortcuts-help";
+import { TooltipProvider } from "@/components/ui/tooltip";
 import { useGlobalShortcuts } from "@/hooks/useGlobalShortcuts";
 import "./index.css";
 
@@ -167,6 +168,7 @@ function App() {
   }, [setView]);
 
   return (
+    <TooltipProvider delayDuration={400}>
     <div className="h-screen w-screen flex flex-col overflow-hidden select-none">
       {view === "recording" ? (
         <>
@@ -185,6 +187,7 @@ function App() {
 
       <ShortcutsHelp />
     </div>
+    </TooltipProvider>
   );
 }
 
