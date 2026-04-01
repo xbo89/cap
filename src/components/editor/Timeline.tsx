@@ -1,7 +1,7 @@
 import { useRef, useEffect, useCallback, useState } from "react";
 import { cn } from "@/lib/utils";
 import type { Clip, Subtitle, ZoomSegment } from "@/lib/ipc";
-import { ZoomIn, ZoomOut, Scissors, Plus, Trash2, Focus } from "lucide-react";
+import { Scissors, Trash2, Subtitles, Eye, Grid3X3, Maximize2, Keyboard } from "lucide-react";
 
 interface TimelineProps {
   duration: number;
@@ -25,7 +25,8 @@ interface TimelineProps {
 }
 
 const TRACK_HEIGHT = 32;
-const RULER_HEIGHT = 24;
+const RULER_HEIGHT = 28;
+const TRACK_GAP = 6;
 
 /** Compute distinct sorted video track IDs from clips. Always includes track 0. */
 function getVideoTrackIds(clips: Clip[]): number[] {
@@ -35,31 +36,34 @@ function getVideoTrackIds(clips: Clip[]): number[] {
   return Array.from(ids).sort((a, b) => a - b);
 }
 
-/** Get Y position for a video track by its index in the sorted track list */
+/** Get Y position for a video track */
 function videoTrackY(trackIndex: number): number {
-  return RULER_HEIGHT + trackIndex * TRACK_HEIGHT;
+  return RULER_HEIGHT + trackIndex * (TRACK_HEIGHT + TRACK_GAP);
 }
 
-/** Get zoom track Y given the number of video tracks */
-function zoomTrackY(videoTrackCount: number): number {
-  return RULER_HEIGHT + videoTrackCount * TRACK_HEIGHT;
-}
-
-/** Get subtitle track Y given the number of video tracks */
-function subtitleTrackY(videoTrackCount: number): number {
-  return RULER_HEIGHT + (videoTrackCount + 1) * TRACK_HEIGHT;
-}
-
-/** Get audio track Y given the number of video tracks */
-function audioTrackY(videoTrackCount: number): number {
-  return RULER_HEIGHT + (videoTrackCount + 2) * TRACK_HEIGHT;
-}
+/** Y offsets below video tracks are computed dynamically in draw code */
 
 type DragType =
   | "playhead"
   | "clip-start" | "clip-end" | "clip-move"
   | "subtitle-start" | "subtitle-end" | "subtitle-move"
   | "zoom-start" | "zoom-end" | "zoom-move";
+
+/** Draw rounded rect on canvas */
+function roundRect(ctx: CanvasRenderingContext2D, x: number, y: number, w: number, h: number, r: number) {
+  r = Math.min(r, w / 2, h / 2);
+  ctx.beginPath();
+  ctx.moveTo(x + r, y);
+  ctx.lineTo(x + w - r, y);
+  ctx.arcTo(x + w, y, x + w, y + r, r);
+  ctx.lineTo(x + w, y + h - r);
+  ctx.arcTo(x + w, y + h, x + w - r, y + h, r);
+  ctx.lineTo(x + r, y + h);
+  ctx.arcTo(x, y + h, x, y + h - r, r);
+  ctx.lineTo(x, y + r);
+  ctx.arcTo(x, y, x + r, y, r);
+  ctx.closePath();
+}
 
 export function Timeline({
   duration,
@@ -83,6 +87,7 @@ export function Timeline({
 }: TimelineProps) {
   const containerRef = useRef<HTMLDivElement>(null);
   const canvasRef = useRef<HTMLCanvasElement>(null);
+  const [containerHeight, setContainerHeight] = useState(200);
   const [zoom, setZoom] = useState(1);
   const [scrollLeft, setScrollLeft] = useState(0);
   const [dragging, setDragging] = useState<{
@@ -93,6 +98,7 @@ export function Timeline({
   } | null>(null);
   const [selectedClip, setSelectedClip] = useState<number | null>(null);
   const [canvasCursor, setCanvasCursor] = useState("crosshair");
+  const [showGrid, setShowGrid] = useState(true);
 
   // Popover state for double-click text edit
   const [popover, setPopover] = useState<{
@@ -102,13 +108,24 @@ export function Timeline({
   } | null>(null);
   const popoverInputRef = useRef<HTMLInputElement>(null);
 
+  // Track container size via ResizeObserver
+  useEffect(() => {
+    const el = containerRef.current;
+    if (!el) return;
+    const ro = new ResizeObserver(([entry]) => {
+      setContainerHeight(entry.contentRect.height);
+    });
+    ro.observe(el);
+    return () => ro.disconnect();
+  }, []);
+
   const containerWidth = containerRef.current?.clientWidth || 800;
   const pixelsPerSecond = Math.max(containerWidth / duration, 20) * zoom;
   const totalWidth = Math.max(duration * pixelsPerSecond, containerWidth);
   const videoTrackIds = getVideoTrackIds(clips);
   const videoTrackCount = videoTrackIds.length;
   const totalTracks = videoTrackCount + 3; // + zoom + subtitle + audio
-  const canvasHeight = RULER_HEIGHT + TRACK_HEIGHT * totalTracks + 8;
+  const canvasHeight = Math.max(RULER_HEIGHT + (TRACK_HEIGHT + TRACK_GAP) * totalTracks + 8, containerHeight);
 
   const timeToX = useCallback(
     (time: number) => time * pixelsPerSecond - scrollLeft,
@@ -134,39 +151,48 @@ export function Timeline({
     ctx.clearRect(0, 0, containerWidth, canvasHeight);
 
     // --- Ruler ---
-    ctx.fillStyle = "#18181b";
-    ctx.fillRect(0, 0, containerWidth, RULER_HEIGHT);
-    ctx.fillStyle = "#71717a";
-    ctx.font = "10px -apple-system, sans-serif";
+    ctx.fillStyle = "rgba(255,255,255,0.08)";
+    ctx.fillRect(0, RULER_HEIGHT - 0.5, containerWidth, 0.5);
+
+    ctx.fillStyle = "#6e6e6e";
+    ctx.font = "10px -apple-system, 'Inter', sans-serif";
     ctx.textAlign = "center";
 
     const step = getTimeStep(pixelsPerSecond);
     const startTime = scrollLeft / pixelsPerSecond;
     const endTime = (scrollLeft + containerWidth) / pixelsPerSecond;
+    const divisions = 8;
+    const subStep = step / divisions;
+
     for (let t = Math.floor(startTime / step) * step; t <= endTime; t += step) {
       const x = timeToX(t);
-      if (x < 0 || x > containerWidth) continue;
-      ctx.fillStyle = "#52525b";
-      ctx.fillRect(x, RULER_HEIGHT - 6, 1, 6);
-      ctx.fillStyle = "#71717a";
-      ctx.fillText(formatTime(t), x, RULER_HEIGHT - 10);
+      if (x < -50 || x > containerWidth + 50) continue;
+
+      // Major tick + label
+      ctx.fillStyle = "#6e6e6e";
+      ctx.fillRect(x, RULER_HEIGHT - 10, 0.5, 10);
+      ctx.fillText(formatTimeRuler(t), x, RULER_HEIGHT - 14);
+
+      // Sub-ticks
+      for (let st = 1; st < divisions; st++) {
+        const sx = timeToX(t + st * subStep);
+        if (sx < 0 || sx > containerWidth) continue;
+        if (st === divisions / 2) {
+          // Half-step tick (taller)
+          ctx.fillStyle = "rgba(255,255,255,0.2)";
+          ctx.fillRect(sx, RULER_HEIGHT - 7, 0.5, 7);
+        } else {
+          ctx.fillStyle = "rgba(255,255,255,0.1)";
+          ctx.fillRect(sx, RULER_HEIGHT - 4, 0.5, 4);
+        }
+      }
     }
 
-    // --- Video tracks (dynamic count) ---
+    // --- Video tracks ---
     const thumbInterval = 2;
-    const trackColors = ["#1a1a2e", "#1a2a1e", "#2a1a1e", "#1a1a3e"];
     for (let ti = 0; ti < videoTrackIds.length; ti++) {
       const trackId = videoTrackIds[ti];
       const tY = videoTrackY(ti);
-
-      ctx.fillStyle = trackColors[ti % trackColors.length];
-      ctx.fillRect(0, tY, containerWidth, TRACK_HEIGHT);
-
-      // Track label
-      ctx.fillStyle = "#52525b";
-      ctx.font = "9px -apple-system, sans-serif";
-      ctx.textAlign = "left";
-      ctx.fillText(ti === 0 ? "VIDEO" : `V${trackId}`, 4, tY + 14);
 
       for (let i = 0; i < clips.length; i++) {
         const clip = clips[i];
@@ -176,18 +202,24 @@ export function Timeline({
         const w = x2 - x1;
         if (x2 < 0 || x1 > containerWidth) continue;
 
-        const clipTop = tY + 2;
-        const clipH = TRACK_HEIGHT - 4;
+        const clipTop = tY;
+        const clipH = TRACK_HEIGHT + 20; // video clips are taller in design (52px)
 
-        ctx.fillStyle = selectedClip === i ? "#2563eb" : "#1e3a5f";
-        ctx.globalAlpha = 1.0;
-        ctx.fillRect(x1, clipTop, w, clipH);
+        // Clip background
+        ctx.save();
+        roundRect(ctx, x1, clipTop, w, clipH, 8);
+        ctx.fillStyle = "#313131";
+        ctx.fill();
 
+        // Thumbnail filmstrip inside clip
         if (thumbnails && thumbnails.size > 0) {
           ctx.save();
-          ctx.beginPath();
-          ctx.rect(x1, clipTop, w, clipH);
+          roundRect(ctx, x1 + 4, clipTop + 2, w - 8, clipH - 4, 6);
           ctx.clip();
+
+          // Inner colored bg
+          ctx.fillStyle = "#5b5bd6";
+          ctx.fillRect(x1 + 4, clipTop + 2, w - 8, clipH - 4);
 
           const srcStart = clip.media_offset;
           const srcEnd = clip.media_offset + (clip.end_time - clip.start_time);
@@ -198,147 +230,202 @@ export function Timeline({
             const tlTime = clip.start_time + (t - clip.media_offset);
             const tx = timeToX(tlTime);
             const tw = thumbInterval * pixelsPerSecond;
-            ctx.globalAlpha = 0.7;
-            ctx.drawImage(bmp, tx, clipTop, tw, clipH);
+            ctx.globalAlpha = 0.85;
+            ctx.drawImage(bmp, tx, clipTop + 2, tw, clipH - 4);
           }
+          ctx.globalAlpha = 1.0;
+          ctx.restore();
+        } else {
+          // No thumbnails: fill inner with accent
+          ctx.save();
+          roundRect(ctx, x1 + 4, clipTop + 2, w - 8, clipH - 4, 6);
+          ctx.fillStyle = "#5b5bd6";
+          ctx.globalAlpha = 0.4;
+          ctx.fill();
           ctx.globalAlpha = 1.0;
           ctx.restore();
         }
 
-        if (selectedClip === i) {
-          ctx.strokeStyle = "#93c5fd";
-          ctx.lineWidth = 1.5;
-          ctx.strokeRect(x1, clipTop, w, clipH);
-        }
-        ctx.fillStyle = "#60a5fa";
-        ctx.globalAlpha = 0.8;
-        ctx.fillRect(x1, clipTop, 3, clipH);
-        ctx.fillRect(x2 - 3, clipTop, 3, clipH);
-        ctx.globalAlpha = 1.0;
-      }
-    }
+        // Border
+        roundRect(ctx, x1, clipTop, w, clipH, 8);
+        ctx.strokeStyle = selectedClip === i ? "rgba(177,169,255,0.7)" : "rgba(255,255,255,0.16)";
+        ctx.lineWidth = 1;
+        ctx.stroke();
 
-    // --- Zoom track ---
-    const zmY = zoomTrackY(videoTrackCount);
-    ctx.fillStyle = "#1a1710";
-    ctx.fillRect(0, zmY, containerWidth, TRACK_HEIGHT);
-    for (let i = 0; i < zoomSegments.length; i++) {
-      const seg = zoomSegments[i];
-      const x1 = timeToX(seg.start_time);
-      const x2 = timeToX(seg.end_time);
-      if (x2 < 0 || x1 > containerWidth) continue;
-      const isSelected = selectedZoomSegmentIndex === i;
-      ctx.fillStyle = isSelected ? "#d97706" : "#f59e0b";
-      ctx.globalAlpha = isSelected ? 0.85 : 0.65;
-      ctx.fillRect(x1, zmY + 4, x2 - x1, TRACK_HEIGHT - 8);
-      ctx.globalAlpha = 1.0;
-      if (isSelected) {
-        ctx.strokeStyle = "#fde68a";
-        ctx.lineWidth = 1.5;
-        ctx.strokeRect(x1, zmY + 4, x2 - x1, TRACK_HEIGHT - 8);
-      }
-      // Label: zoom level
-      ctx.fillStyle = "#fff";
-      ctx.font = "10px -apple-system, sans-serif";
-      ctx.textAlign = "left";
-      const textW = x2 - x1 - 8;
-      if (textW > 20) {
-        ctx.save();
-        ctx.beginPath();
-        ctx.rect(x1 + 4, zmY + 4, textW, TRACK_HEIGHT - 8);
-        ctx.clip();
-        ctx.fillText(`${seg.zoom_level.toFixed(1)}×`, x1 + 4, zmY + TRACK_HEIGHT / 2 + 3);
+        // Edge resize handles
+        ctx.fillStyle = "rgba(255,255,255,0.3)";
+        roundRect(ctx, x1, clipTop, 3, clipH, 1.5);
+        ctx.fill();
+        roundRect(ctx, x2 - 3, clipTop, 3, clipH, 1.5);
+        ctx.fill();
+
         ctx.restore();
       }
-      // Edge handles
-      ctx.fillStyle = "#fbbf24";
-      ctx.globalAlpha = 0.8;
-      ctx.fillRect(x1, zmY + 4, 3, TRACK_HEIGHT - 8);
-      ctx.fillRect(x2 - 3, zmY + 4, 3, TRACK_HEIGHT - 8);
-      ctx.globalAlpha = 1.0;
     }
 
+    // Adjust Y calculation for video tracks being taller
+    const videoTrackTotalHeight = videoTrackCount * (TRACK_HEIGHT + 20 + TRACK_GAP);
+    const postVideoY = RULER_HEIGHT + videoTrackTotalHeight;
+
     // --- Subtitle track ---
-    const subY = subtitleTrackY(videoTrackCount);
-    ctx.fillStyle = "#18181b";
-    ctx.fillRect(0, subY, containerWidth, TRACK_HEIGHT);
+    const subY = postVideoY;
     for (let i = 0; i < subtitles.length; i++) {
       const sub = subtitles[i];
       const x1 = timeToX(sub.start_time);
       const x2 = timeToX(sub.end_time);
       if (x2 < 0 || x1 > containerWidth) continue;
       const isSelected = selectedSubtitleIndex === i;
-      ctx.fillStyle = isSelected ? "#c084fc" : "#a855f7";
-      ctx.globalAlpha = isSelected ? 0.85 : 0.7;
-      ctx.fillRect(x1, subY + 4, x2 - x1, TRACK_HEIGHT - 8);
-      ctx.globalAlpha = 1.0;
-      if (isSelected) {
-        ctx.strokeStyle = "#e9d5ff";
-        ctx.lineWidth = 1.5;
-        ctx.strokeRect(x1, subY + 4, x2 - x1, TRACK_HEIGHT - 8);
-      }
-      ctx.fillStyle = "#fff";
-      ctx.font = "10px -apple-system, sans-serif";
+      const w = x2 - x1;
+
+      ctx.save();
+      roundRect(ctx, x1, subY, w, TRACK_HEIGHT, 16);
+      ctx.fillStyle = isSelected ? "#5b5bd6" : "#313131";
+      ctx.fill();
+      ctx.strokeStyle = isSelected ? "rgba(177,169,255,0.7)" : "rgba(255,255,255,0.16)";
+      ctx.lineWidth = 1;
+      ctx.stroke();
+
+      // Subtitle icon (text lines)
+      const iconX = x1 + 12;
+      const iconY = subY + 8;
+      ctx.fillStyle = isSelected ? "#b1a9ff" : "#6e6e6e";
+      ctx.fillRect(iconX, iconY, 10, 1.5);
+      ctx.fillRect(iconX, iconY + 4, 8, 1.5);
+      ctx.fillRect(iconX, iconY + 8, 10, 1.5);
+      ctx.fillRect(iconX + 2, iconY + 12, 6, 1.5);
+
+      // Text label
+      ctx.fillStyle = isSelected ? "#b1a9ff" : "#6e6e6e";
+      ctx.font = "12px -apple-system, 'Inter', sans-serif";
       ctx.textAlign = "left";
-      const textW = x2 - x1 - 8;
+      const textW = w - 36;
       if (textW > 10) {
         ctx.save();
         ctx.beginPath();
-        ctx.rect(x1 + 4, subY + 4, textW, TRACK_HEIGHT - 8);
+        ctx.rect(x1 + 30, subY, textW, TRACK_HEIGHT);
         ctx.clip();
-        ctx.fillText(sub.text || "(empty)", x1 + 4, subY + TRACK_HEIGHT / 2 + 3);
+        ctx.fillText(sub.text || "(empty)", x1 + 30, subY + TRACK_HEIGHT / 2 + 4);
+        ctx.restore();
+      }
+      ctx.restore();
+    }
+
+    // --- Audio/Music track ---
+    const audioY = postVideoY + TRACK_HEIGHT + TRACK_GAP;
+    if (waveform.length > 0) {
+      // Draw music pill
+      const waveStart = 0;
+      const waveEnd = sourceDuration;
+      const wx1 = timeToX(waveStart);
+      const wx2 = timeToX(waveEnd);
+      const ww = wx2 - wx1;
+      if (ww > 0) {
+        ctx.save();
+        roundRect(ctx, wx1, audioY, ww, TRACK_HEIGHT, 16);
+        ctx.fillStyle = "#313131";
+        ctx.fill();
+        ctx.strokeStyle = "rgba(255,255,255,0.16)";
+        ctx.lineWidth = 1;
+        ctx.stroke();
+
+        // Music icon
+        ctx.fillStyle = "#6e6e6e";
+        ctx.font = "11px -apple-system, 'Inter', sans-serif";
+        ctx.textAlign = "left";
+
+        // Waveform inside pill
+        ctx.save();
+        roundRect(ctx, wx1, audioY, ww, TRACK_HEIGHT, 16);
+        ctx.clip();
+        ctx.fillStyle = "rgba(110,110,110,0.4)";
+        const samplesPerPixel = waveform.length / totalWidth;
+        for (let px = Math.max(0, wx1); px < Math.min(containerWidth, wx2); px++) {
+          const sampleIdx = Math.floor((px + scrollLeft) * samplesPerPixel);
+          if (sampleIdx >= 0 && sampleIdx < waveform.length) {
+            const amp = waveform[sampleIdx];
+            const barH = amp * (TRACK_HEIGHT - 8);
+            ctx.fillRect(px, audioY + TRACK_HEIGHT / 2 - barH / 2, 1, Math.max(barH, 1));
+          }
+        }
+        ctx.restore();
         ctx.restore();
       }
     }
 
-    // --- Audio waveform ---
-    const audioY = audioTrackY(videoTrackCount);
-    ctx.fillStyle = "#1a1a1a";
-    ctx.fillRect(0, audioY, containerWidth, TRACK_HEIGHT);
-    if (waveform.length > 0) {
-      ctx.fillStyle = "#22c55e";
-      ctx.globalAlpha = 0.7;
-      const samplesPerPixel = waveform.length / totalWidth;
-      for (let px = 0; px < containerWidth; px++) {
-        const sampleIdx = Math.floor((px + scrollLeft) * samplesPerPixel);
-        if (sampleIdx >= 0 && sampleIdx < waveform.length) {
-          const amp = waveform[sampleIdx];
-          const barH = amp * (TRACK_HEIGHT - 4);
-          ctx.fillRect(px, audioY + TRACK_HEIGHT / 2 - barH / 2, 1, Math.max(barH, 1));
-        }
+    // --- Zoom/Focus track ---
+    const focusY = audioY + TRACK_HEIGHT + TRACK_GAP;
+    for (let i = 0; i < zoomSegments.length; i++) {
+      const seg = zoomSegments[i];
+      const x1 = timeToX(seg.start_time);
+      const x2 = timeToX(seg.end_time);
+      if (x2 < 0 || x1 > containerWidth) continue;
+      const isSelected = selectedZoomSegmentIndex === i;
+      const w = x2 - x1;
+
+      ctx.save();
+      roundRect(ctx, x1, focusY, w, TRACK_HEIGHT, 16);
+      ctx.fillStyle = "#202248";
+      ctx.fill();
+      ctx.strokeStyle = isSelected ? "rgba(177,169,255,0.5)" : "rgba(255,255,255,0.12)";
+      ctx.lineWidth = 1;
+      ctx.stroke();
+
+      // Focus icon (circle)
+      const cx = x1 + 20;
+      const cy = focusY + TRACK_HEIGHT / 2;
+      ctx.strokeStyle = "#5b5bd6";
+      ctx.lineWidth = 1.5;
+      ctx.beginPath();
+      ctx.arc(cx, cy, 6, 0, Math.PI * 2);
+      ctx.stroke();
+      // Crosshair
+      ctx.beginPath();
+      ctx.moveTo(cx - 3, cy);
+      ctx.lineTo(cx + 3, cy);
+      ctx.moveTo(cx, cy - 3);
+      ctx.lineTo(cx, cy + 3);
+      ctx.stroke();
+
+      // Progress bar
+      if (w > 50) {
+        const barX = x1 + 35;
+        const barW = w - 43;
+        const barY = focusY + TRACK_HEIGHT / 2 - 2;
+        // bg
+        roundRect(ctx, barX, barY, barW, 4, 2);
+        ctx.fillStyle = "rgba(255,255,255,0.08)";
+        ctx.fill();
+        // fill
+        const fillRatio = Math.min(1, (seg.zoom_level - 1) / 4);
+        roundRect(ctx, barX, barY, barW * fillRatio, 4, 2);
+        ctx.fillStyle = "#5b5bd6";
+        ctx.fill();
       }
-      ctx.globalAlpha = 1.0;
+
+      ctx.restore();
     }
 
     // --- Playhead ---
     const phx = timeToX(currentTime);
     if (phx >= 0 && phx <= containerWidth) {
+      // Vertical line
       ctx.strokeStyle = "#ef4444";
-      ctx.lineWidth = 1.5;
+      ctx.lineWidth = 1;
       ctx.beginPath();
-      ctx.moveTo(phx, 0);
+      ctx.moveTo(phx, RULER_HEIGHT);
       ctx.lineTo(phx, canvasHeight);
       ctx.stroke();
+
+      // Red dot at top
       ctx.fillStyle = "#ef4444";
       ctx.beginPath();
-      ctx.moveTo(phx - 5, 0);
-      ctx.lineTo(phx + 5, 0);
-      ctx.lineTo(phx, 8);
-      ctx.closePath();
+      ctx.arc(phx, RULER_HEIGHT - 2, 6, 0, Math.PI * 2);
       ctx.fill();
     }
-
-    // Track labels
-    ctx.fillStyle = "#52525b";
-    ctx.font = "9px -apple-system, sans-serif";
-    ctx.textAlign = "left";
-    ctx.fillText("ZOOM", 4, zmY + 14);
-    ctx.fillText("SUBS", 4, subY + 14);
-    ctx.fillText("AUDIO", 4, audioY + 14);
   }, [
     containerWidth, canvasHeight, duration, currentTime, waveform,
     clips, subtitles, zoomSegments, thumbnails, pixelsPerSecond, scrollLeft, timeToX, totalWidth,
-    selectedSubtitleIndex, selectedClip, selectedZoomSegmentIndex,
+    selectedSubtitleIndex, selectedClip, selectedZoomSegmentIndex, sourceDuration,
   ]);
 
   // Mouse handlers
@@ -350,88 +437,71 @@ export function Timeline({
       const y = e.clientY - rect.top;
       const time = xToTime(x);
 
-      // Zoom track
-      const zmY = zoomTrackY(videoTrackCount);
-      if (y >= zmY && y < zmY + TRACK_HEIGHT) {
+      const videoTrackTotalHeight = videoTrackCount * (TRACK_HEIGHT + 20 + TRACK_GAP);
+      const postVideoY = RULER_HEIGHT + videoTrackTotalHeight;
+      const subY = postVideoY;
+      const audioY = postVideoY + TRACK_HEIGHT + TRACK_GAP;
+      const focusY = audioY + TRACK_HEIGHT + TRACK_GAP;
+
+      // Zoom/Focus track
+      if (y >= focusY && y < focusY + TRACK_HEIGHT) {
         for (let i = 0; i < zoomSegments.length; i++) {
           const seg = zoomSegments[i];
           const x1 = timeToX(seg.start_time);
           const x2 = timeToX(seg.end_time);
           if (Math.abs(x - x1) < 5) {
-            onZoomSegmentSelect(i);
-            onSubtitleSelect(null);
-            setSelectedClip(null);
+            onZoomSegmentSelect(i); onSubtitleSelect(null); setSelectedClip(null);
             setDragging({ type: "zoom-start", index: i, startX: x, startTime: seg.start_time });
             return;
           }
           if (Math.abs(x - x2) < 5) {
-            onZoomSegmentSelect(i);
-            onSubtitleSelect(null);
-            setSelectedClip(null);
+            onZoomSegmentSelect(i); onSubtitleSelect(null); setSelectedClip(null);
             setDragging({ type: "zoom-end", index: i, startX: x, startTime: seg.end_time });
             return;
           }
           if (x >= x1 && x <= x2) {
-            onZoomSegmentSelect(i);
-            onSubtitleSelect(null);
-            setSelectedClip(null);
+            onZoomSegmentSelect(i); onSubtitleSelect(null); setSelectedClip(null);
             setDragging({ type: "zoom-move", index: i, startX: x, startTime: time });
             return;
           }
         }
-        // Clicked empty space on zoom track — deselect
-        onZoomSegmentSelect(null);
-        onSubtitleSelect(null);
-        setPopover(null);
+        onZoomSegmentSelect(null); onSubtitleSelect(null); setPopover(null);
       }
 
       // Subtitle track
-      const subY = subtitleTrackY(videoTrackCount);
       if (y >= subY && y < subY + TRACK_HEIGHT) {
         for (let i = 0; i < subtitles.length; i++) {
           const sub = subtitles[i];
           const x1 = timeToX(sub.start_time);
           const x2 = timeToX(sub.end_time);
           if (Math.abs(x - x1) < 5) {
-            onSubtitleSelect(i);
-            onZoomSegmentSelect(null);
-            setSelectedClip(null);
+            onSubtitleSelect(i); onZoomSegmentSelect(null); setSelectedClip(null);
             setDragging({ type: "subtitle-start", index: i, startX: x, startTime: sub.start_time });
             return;
           }
           if (Math.abs(x - x2) < 5) {
-            onSubtitleSelect(i);
-            onZoomSegmentSelect(null);
-            setSelectedClip(null);
+            onSubtitleSelect(i); onZoomSegmentSelect(null); setSelectedClip(null);
             setDragging({ type: "subtitle-end", index: i, startX: x, startTime: sub.end_time });
             return;
           }
           if (x >= x1 && x <= x2) {
             if (e.detail === 2) {
-              // Double-click: show popover for text editing
               onSubtitleSelect(i);
               setPopover({ index: i, x: e.clientX - rect.left, y: subY });
               return;
             }
-            // Single click: select + drag
-            onSubtitleSelect(i);
-            onZoomSegmentSelect(null);
-            setSelectedClip(null);
+            onSubtitleSelect(i); onZoomSegmentSelect(null); setSelectedClip(null);
             setDragging({ type: "subtitle-move", index: i, startX: x, startTime: time });
             return;
           }
         }
-        onSubtitleSelect(null);
-        onZoomSegmentSelect(null);
-        setPopover(null);
+        onSubtitleSelect(null); onZoomSegmentSelect(null); setPopover(null);
       }
 
-      // Video tracks (dynamic)
-      const allVideoTop = RULER_HEIGHT;
-      const allVideoBottom = RULER_HEIGHT + videoTrackCount * TRACK_HEIGHT;
-      if (y >= allVideoTop && y < allVideoBottom) {
-        // Determine which track was clicked
-        const clickedTrackIndex = Math.floor((y - RULER_HEIGHT) / TRACK_HEIGHT);
+      // Video tracks
+      const videoBottom = RULER_HEIGHT + videoTrackCount * (TRACK_HEIGHT + 20 + TRACK_GAP);
+      if (y >= RULER_HEIGHT && y < videoBottom) {
+        const clickedTrackIndex = Math.floor((y - RULER_HEIGHT) / (TRACK_HEIGHT + 20 + TRACK_GAP));
         const clickedTrackId = videoTrackIds[clickedTrackIndex] ?? 0;
 
         for (let i = 0; i < clips.length; i++) {
@@ -440,23 +510,17 @@ export function Timeline({
           const x1 = timeToX(clip.start_time);
           const x2 = timeToX(clip.end_time);
           if (Math.abs(x - x1) < 5) {
-            setSelectedClip(i);
-            onSubtitleSelect(null);
-            onZoomSegmentSelect(null);
+            setSelectedClip(i); onSubtitleSelect(null); onZoomSegmentSelect(null);
             setDragging({ type: "clip-start", index: i, startX: x, startTime: clip.start_time });
             return;
           }
           if (Math.abs(x - x2) < 5) {
-            setSelectedClip(i);
-            onSubtitleSelect(null);
-            onZoomSegmentSelect(null);
+            setSelectedClip(i); onSubtitleSelect(null); onZoomSegmentSelect(null);
             setDragging({ type: "clip-end", index: i, startX: x, startTime: clip.end_time });
             return;
           }
           if (x >= x1 && x <= x2) {
-            setSelectedClip(i);
-            onSubtitleSelect(null);
-            onZoomSegmentSelect(null);
+            setSelectedClip(i); onSubtitleSelect(null); onZoomSegmentSelect(null);
             setDragging({ type: "clip-move", index: i, startX: x, startTime: time });
             return;
           }
@@ -465,20 +529,16 @@ export function Timeline({
       }
 
       // Default: seek
-      onSubtitleSelect(null);
-      onZoomSegmentSelect(null);
-      setPopover(null);
+      onSubtitleSelect(null); onZoomSegmentSelect(null); setPopover(null);
       onSeek(time);
       setDragging({ type: "playhead", index: 0, startX: x, startTime: time });
     },
-    [xToTime, timeToX, clips, subtitles, zoomSegments, onSeek, onSubtitleSelect, onZoomSegmentSelect]
+    [xToTime, timeToX, clips, subtitles, zoomSegments, onSeek, onSubtitleSelect, onZoomSegmentSelect, videoTrackCount, videoTrackIds]
   );
 
   // Get sorted neighbor boundaries for overlap prevention
   const getNeighborBounds = useCallback((items: { start_time: number; end_time: number }[], index: number) => {
-    const sorted = items
-      .map((item, i) => ({ ...item, origIndex: i }))
-      .sort((a, b) => a.start_time - b.start_time);
+    const sorted = items.map((item, i) => ({ ...item, origIndex: i })).sort((a, b) => a.start_time - b.start_time);
     const sortedPos = sorted.findIndex(s => s.origIndex === index);
     const prevEnd = sortedPos > 0 ? sorted[sortedPos - 1].end_time : 0;
     const nextStart = sortedPos < sorted.length - 1 ? sorted[sortedPos + 1].start_time : Infinity;
@@ -496,23 +556,16 @@ export function Timeline({
 
       switch (dragging.type) {
         case "playhead": onSeek(time); break;
-
-        // --- Clip trimming: constrain to neighbors on same track ---
         case "clip-start": {
           const trackClips = clips.map((c, i) => ({ ...c, _i: i })).filter(c => (c.track_id ?? 0) === (clips[dragging.index].track_id ?? 0));
           const mappedIdx = trackClips.findIndex(c => c._i === dragging.index);
           const { prevEnd } = getNeighborBounds(trackClips, mappedIdx);
           const clip = clips[dragging.index];
-          // Can't trim left beyond source start (media_offset >= 0)
           const minStart = clip.start_time - clip.media_offset;
           const newStart = Math.max(prevEnd, Math.max(minStart, Math.min(time, clip.end_time - MIN_DUR)));
           const startDelta = newStart - clip.start_time;
           const nc = [...clips];
-          nc[dragging.index] = {
-            ...clip,
-            start_time: newStart,
-            media_offset: clip.media_offset + startDelta,
-          };
+          nc[dragging.index] = { ...clip, start_time: newStart, media_offset: clip.media_offset + startDelta };
           onClipsChange(nc);
           break;
         }
@@ -521,7 +574,6 @@ export function Timeline({
           const mappedIdx2 = trackClips2.findIndex(c => c._i === dragging.index);
           const { nextStart } = getNeighborBounds(trackClips2, mappedIdx2);
           const clip = clips[dragging.index];
-          // Can't extend past source end
           const maxEnd = clip.start_time + (sourceDuration - clip.media_offset);
           const newEnd = Math.min(nextStart, Math.min(maxEnd, Math.max(time, clip.start_time + MIN_DUR)));
           const nc = [...clips];
@@ -543,8 +595,6 @@ export function Timeline({
           setDragging({ ...dragging, startTime: time });
           break;
         }
-
-        // --- Subtitle trimming: constrain to neighbors ---
         case "subtitle-start": {
           const { prevEnd } = getNeighborBounds(subtitles, dragging.index);
           const sub = subtitles[dragging.index];
@@ -575,8 +625,6 @@ export function Timeline({
           setDragging({ ...dragging, startTime: time });
           break;
         }
-
-        // --- Zoom segment trimming: constrain to neighbors ---
         case "zoom-start": {
           const { prevEnd } = getNeighborBounds(zoomSegments, dragging.index);
           const seg = zoomSegments[dragging.index];
@@ -609,69 +657,55 @@ export function Timeline({
         }
       }
     },
-    [dragging, xToTime, clips, subtitles, zoomSegments, duration, onSeek, onClipsChange, onSubtitlesChange, onZoomSegmentsChange, getNeighborBounds]
+    [dragging, xToTime, clips, subtitles, zoomSegments, duration, sourceDuration, onSeek, onClipsChange, onSubtitlesChange, onZoomSegmentsChange, getNeighborBounds]
   );
 
   const handleMouseUp = useCallback(() => { setDragging(null); setCanvasCursor("crosshair"); }, []);
 
-  // Cursor feedback: detect edge vs body on hover
   const handleCanvasHover = useCallback(
     (e: React.MouseEvent) => {
-      if (dragging) return; // cursor handled by drag type
+      if (dragging) return;
       const rect = canvasRef.current?.getBoundingClientRect();
       if (!rect) return;
       const x = e.clientX - rect.left;
       const y = e.clientY - rect.top;
 
-      const allVideoBottom = RULER_HEIGHT + videoTrackCount * TRACK_HEIGHT;
-      const zmY = zoomTrackY(videoTrackCount);
-      const subY = subtitleTrackY(videoTrackCount);
+      const videoTrackTotalHeight = videoTrackCount * (TRACK_HEIGHT + 20 + TRACK_GAP);
+      const postVideoY = RULER_HEIGHT + videoTrackTotalHeight;
+      const subY = postVideoY;
+      const audioY = postVideoY + TRACK_HEIGHT + TRACK_GAP;
+      const focusY = audioY + TRACK_HEIGHT + TRACK_GAP;
 
-      // Check video tracks
-      if (y >= RULER_HEIGHT && y < allVideoBottom) {
-        const hoverTrackIndex = Math.floor((y - RULER_HEIGHT) / TRACK_HEIGHT);
-        const hoverTrackId = videoTrackIds[hoverTrackIndex] ?? 0;
+      // Video tracks
+      if (y >= RULER_HEIGHT && y < RULER_HEIGHT + videoTrackTotalHeight) {
         for (const clip of clips) {
-          if ((clip.track_id ?? 0) !== hoverTrackId) continue;
           const x1 = timeToX(clip.start_time);
           const x2 = timeToX(clip.end_time);
-          if (Math.abs(x - x1) < 5 || Math.abs(x - x2) < 5) {
-            setCanvasCursor("col-resize"); return;
-          }
-          if (x >= x1 && x <= x2) {
-            setCanvasCursor("grab"); return;
-          }
+          if (Math.abs(x - x1) < 5 || Math.abs(x - x2) < 5) { setCanvasCursor("col-resize"); return; }
+          if (x >= x1 && x <= x2) { setCanvasCursor("grab"); return; }
         }
       }
-      // Check zoom track
-      if (y >= zmY && y < zmY + TRACK_HEIGHT) {
+      // Focus track
+      if (y >= focusY && y < focusY + TRACK_HEIGHT) {
         for (const seg of zoomSegments) {
           const x1 = timeToX(seg.start_time);
           const x2 = timeToX(seg.end_time);
-          if (Math.abs(x - x1) < 5 || Math.abs(x - x2) < 5) {
-            setCanvasCursor("col-resize"); return;
-          }
-          if (x >= x1 && x <= x2) {
-            setCanvasCursor("grab"); return;
-          }
+          if (Math.abs(x - x1) < 5 || Math.abs(x - x2) < 5) { setCanvasCursor("col-resize"); return; }
+          if (x >= x1 && x <= x2) { setCanvasCursor("grab"); return; }
         }
       }
-      // Check subtitle track
+      // Subtitle track
       if (y >= subY && y < subY + TRACK_HEIGHT) {
         for (const sub of subtitles) {
           const x1 = timeToX(sub.start_time);
           const x2 = timeToX(sub.end_time);
-          if (Math.abs(x - x1) < 5 || Math.abs(x - x2) < 5) {
-            setCanvasCursor("col-resize"); return;
-          }
-          if (x >= x1 && x <= x2) {
-            setCanvasCursor("grab"); return;
-          }
+          if (Math.abs(x - x1) < 5 || Math.abs(x - x2) < 5) { setCanvasCursor("col-resize"); return; }
+          if (x >= x1 && x <= x2) { setCanvasCursor("grab"); return; }
         }
       }
       setCanvasCursor("crosshair");
     },
-    [dragging, clips, subtitles, zoomSegments, timeToX]
+    [dragging, clips, subtitles, zoomSegments, timeToX, videoTrackCount]
   );
 
   const handleWheel = useCallback(
@@ -698,7 +732,6 @@ export function Timeline({
     return () => document.removeEventListener("mousedown", handle);
   }, [popover]);
 
-  // Focus popover input when it appears
   useEffect(() => {
     if (popover) popoverInputRef.current?.focus();
   }, [popover]);
@@ -708,45 +741,27 @@ export function Timeline({
     const segDuration = 3;
     const newStart = currentTime;
     const newEnd = Math.min(currentTime + segDuration, duration);
-
-    // Check overlap with existing segments
-    const overlaps = zoomSegments.some(s =>
-      newStart < s.end_time && newEnd > s.start_time
-    );
-    if (overlaps) return; // Don't create if it would overlap
-
+    const overlaps = zoomSegments.some(s => newStart < s.end_time && newEnd > s.start_time);
+    if (overlaps) return;
     const newSeg: ZoomSegment = {
-      start_time: newStart,
-      end_time: newEnd,
-      zoom_level: 2.0,
-      follow_speed: 0.15,
-      padding: 100,
+      start_time: newStart, end_time: newEnd,
+      zoom_level: 2.0, follow_speed: 0.15, padding: 100,
     };
     const newSegs = [...zoomSegments, newSeg].sort((a, b) => a.start_time - b.start_time);
     onZoomSegmentsChange(newSegs);
     onZoomSegmentSelect(newSegs.findIndex(s => s.start_time === newStart));
   }, [currentTime, duration, zoomSegments, onZoomSegmentsChange, onZoomSegmentSelect]);
 
+  const hasSelection = selectedClip !== null || selectedSubtitleIndex !== null || selectedZoomSegmentIndex !== null;
+
   return (
-    <div className={cn("flex flex-col", className)}>
+    <div className={cn("flex flex-col h-full", className)}>
       {/* Toolbar */}
-      <div className="flex items-center gap-2 px-3 py-1 border-b border-border text-xs">
-        <button
-          className="flex items-center gap-1 px-2 py-0.5 bg-secondary rounded text-muted-foreground hover:text-foreground"
-          onClick={onSplit}
-          title="Split at playhead (S)"
-        >
-          <Scissors className="h-3 w-3" />
-          Split
-        </button>
-        <button
-          className={cn(
-            "flex items-center gap-1 px-2 py-0.5 rounded",
-            selectedClip !== null || selectedSubtitleIndex !== null || selectedZoomSegmentIndex !== null
-              ? "bg-destructive/20 text-destructive hover:bg-destructive/30"
-              : "bg-secondary text-muted-foreground opacity-50 cursor-not-allowed"
-          )}
-          onClick={() => {
+      <div className="flex items-center justify-between px-4 py-1.5">
+        {/* Left: action buttons */}
+        <div className="flex items-center gap-2">
+          <ToolbarButton icon={<Scissors className="size-4" />} onClick={onSplit} title="Split (S)" />
+          <ToolbarButton icon={<Trash2 className="size-4" />} onClick={() => {
             if (selectedZoomSegmentIndex !== null) {
               onZoomSegmentsChange(zoomSegments.filter((_, i) => i !== selectedZoomSegmentIndex));
               onZoomSegmentSelect(null);
@@ -757,69 +772,42 @@ export function Timeline({
               onClipsChange(clips.filter((_, i) => i !== selectedClip));
               setSelectedClip(null);
             }
-          }}
-          disabled={selectedClip === null && selectedSubtitleIndex === null && selectedZoomSegmentIndex === null}
-          title="Delete selected (Backspace)"
-        >
-          <Trash2 className="h-3 w-3" />
-          Delete
-        </button>
-        <div className="w-px h-4 bg-border" />
-        <button
-          className="flex items-center gap-1 px-2 py-0.5 bg-secondary rounded text-muted-foreground hover:text-foreground"
-          onClick={addZoomSegment}
-          title="Add zoom segment at playhead"
-        >
-          <Focus className="h-3 w-3" />
-          Zoom
-        </button>
-        <button
-          className="flex items-center gap-1 px-2 py-0.5 bg-secondary rounded text-muted-foreground hover:text-foreground"
-          onClick={() => {
+          }} disabled={!hasSelection} title="Delete (Backspace)" />
+          <ToolbarButton icon={<Subtitles className="size-4" />} onClick={() => {
             const newSub: Subtitle = {
               start_time: currentTime,
               end_time: Math.min(currentTime + 3, duration),
               text: "New subtitle",
             };
             onSubtitlesChange([...subtitles, newSub]);
-          }}
-          title="Add subtitle at playhead"
-        >
-          <Plus className="h-3 w-3" />
-          Subtitle
-        </button>
-        <div className="flex-1" />
-        <span className="text-muted-foreground">{formatTime(currentTime)} / {formatTime(sourceDuration)}</span>
-        <div className="flex-1" />
-        <button
-          className="p-0.5 bg-secondary rounded text-muted-foreground hover:text-foreground"
-          onClick={() => setZoom((z) => Math.max(0.5, z / 1.3))}
-          title="Zoom out"
-        >
-          <ZoomOut className="h-3.5 w-3.5" />
-        </button>
-        <input
-          type="range"
-          min={-3} max={13} step={0.1}
-          value={Math.log(zoom) / Math.log(1.3)}
-          onChange={(e) => setZoom(Math.pow(1.3, parseFloat(e.target.value)))}
-          className="w-20 h-1 accent-primary"
-          title={`Zoom: ${zoom.toFixed(1)}×`}
-        />
-        <button
-          className="p-0.5 bg-secondary rounded text-muted-foreground hover:text-foreground"
-          onClick={() => setZoom((z) => Math.min(20, z * 1.3))}
-          title="Zoom in"
-        >
-          <ZoomIn className="h-3.5 w-3.5" />
-        </button>
-        <span className="text-muted-foreground w-10 text-right">{zoom.toFixed(1)}×</span>
+          }} title="Add subtitle" />
+          <ToolbarButton icon={<Eye className="size-4" />} onClick={addZoomSegment} title="Add zoom" />
+        </div>
+
+        {/* Center: timecode */}
+        <div className="text-xs tracking-wider whitespace-nowrap">
+          <span className="text-[#b1a9ff]">{formatTime(currentTime)}</span>
+          <span className="text-[#6e6e6e] mx-2">/</span>
+          <span className="text-[#6e6e6e]">{formatTime(sourceDuration)}</span>
+        </div>
+
+        {/* Right: view buttons */}
+        <div className="flex items-center gap-2">
+          <ToolbarButton
+            icon={<Grid3X3 className="size-4" />}
+            active={showGrid}
+            onClick={() => setShowGrid(g => !g)}
+            title="Toggle grid"
+          />
+          <ToolbarButton icon={<Maximize2 className="size-4" />} onClick={() => setZoom(1)} title="Fit to view" />
+          <ToolbarButton icon={<Keyboard className="size-4" />} onClick={() => window.dispatchEvent(new Event("toggle-shortcuts-help"))} title="Keyboard shortcuts" />
+        </div>
       </div>
 
       {/* Canvas */}
       <div
         ref={containerRef}
-        className="relative overflow-hidden"
+        className="relative overflow-hidden flex-1 min-h-0"
         style={{ cursor: canvasCursor }}
         onWheel={handleWheel}
         onDragOver={(e) => {
@@ -837,31 +825,24 @@ export function Timeline({
           const x = e.clientX - rect.left;
           const y = e.clientY - rect.top;
           const dropTime = xToTime(x);
-
-          // Determine target track
           let targetTrackId = 0;
-          if (y >= RULER_HEIGHT && y < RULER_HEIGHT + videoTrackCount * TRACK_HEIGHT) {
-            const trackIdx = Math.floor((y - RULER_HEIGHT) / TRACK_HEIGHT);
+          const videoBottom = RULER_HEIGHT + videoTrackCount * (TRACK_HEIGHT + 20 + TRACK_GAP);
+          if (y >= RULER_HEIGHT && y < videoBottom) {
+            const trackIdx = Math.floor((y - RULER_HEIGHT) / (TRACK_HEIGHT + 20 + TRACK_GAP));
             targetTrackId = videoTrackIds[trackIdx] ?? 0;
           } else {
-            // Dropped below existing tracks — create new track
             targetTrackId = Math.max(...videoTrackIds, 0) + 1;
           }
-
-          // Create a new clip for the dragged session (duration will be set by parent)
           const newClip: Clip = {
-            start_time: dropTime,
-            end_time: dropTime + 10, // placeholder, parent should update with real duration
-            media_offset: 0,
-            track_id: targetTrackId,
-            source_session_id: sessionId,
+            start_time: dropTime, end_time: dropTime + 10, media_offset: 0,
+            track_id: targetTrackId, source_session_id: sessionId,
           };
           onClipsChange([...clips, newClip]);
         }}
       >
         <canvas
           ref={canvasRef}
-          style={{ width: "100%", height: canvasHeight }}
+          style={{ width: "100%", height: "100%" }}
           onMouseDown={handleMouseDown}
           onMouseMove={dragging ? handleMouseMove : handleCanvasHover}
           onMouseUp={handleMouseUp}
@@ -872,7 +853,7 @@ export function Timeline({
         {popover && popover.index < subtitles.length && (
           <div
             data-subtitle-popover
-            className="absolute z-10 bg-card border border-border rounded-lg shadow-lg p-2 flex flex-col gap-1.5"
+            className="absolute z-10 backdrop-blur-[60px] bg-[rgba(25,25,25,0.9)] border border-white/[0.12] rounded-xl shadow-lg p-3 flex flex-col gap-2"
             style={{
               left: Math.min(popover.x, containerWidth - 260),
               top: popover.y + TRACK_HEIGHT + 4,
@@ -881,7 +862,7 @@ export function Timeline({
           >
             <input
               ref={popoverInputRef}
-              className="w-full bg-background border border-input rounded px-2 py-1 text-sm"
+              className="w-full bg-white/[0.06] rounded-[10px] px-2 py-1.5 text-sm text-white border-none outline-none"
               value={subtitles[popover.index].text}
               onChange={(e) => {
                 const ns = [...subtitles];
@@ -893,11 +874,11 @@ export function Timeline({
               }}
             />
             <div className="flex justify-between">
-              <span className="text-[10px] text-muted-foreground">
+              <span className="text-[10px] text-[#6e6e6e]">
                 {formatTime(subtitles[popover.index].start_time)} - {formatTime(subtitles[popover.index].end_time)}
               </span>
               <button
-                className="text-[10px] text-destructive hover:underline"
+                className="text-[10px] text-red-400 hover:text-red-300"
                 onClick={() => {
                   onSubtitlesChange(subtitles.filter((_, i) => i !== popover.index));
                   onSubtitleSelect(null);
@@ -914,19 +895,63 @@ export function Timeline({
   );
 }
 
+/** Glass-morphism toolbar button matching the design */
+function ToolbarButton({
+  icon, onClick, title, active, disabled,
+}: {
+  icon: React.ReactNode;
+  onClick: () => void;
+  title?: string;
+  active?: boolean;
+  disabled?: boolean;
+}) {
+  return (
+    <button
+      className={cn(
+        "flex items-center justify-center size-8 rounded-full backdrop-blur-[60px] transition-colors",
+        active
+          ? "bg-[rgba(91,91,214,0.16)] text-[#b1a9ff]"
+          : "bg-white/[0.04] text-white/60 hover:bg-white/[0.08] hover:text-white/80",
+        disabled && "opacity-30 pointer-events-none"
+      )}
+      onClick={onClick}
+      title={title}
+      disabled={disabled}
+    >
+      {icon}
+    </button>
+  );
+}
+
 function getTimeStep(pxPerSec: number): number {
-  if (pxPerSec > 300) return 0.5;
-  if (pxPerSec > 150) return 1;
-  if (pxPerSec > 60) return 5;
-  if (pxPerSec > 25) return 10;
+  if (pxPerSec > 400) return 0.25;
+  if (pxPerSec > 200) return 0.5;
+  if (pxPerSec > 100) return 1;
+  if (pxPerSec > 50) return 2;
+  if (pxPerSec > 25) return 5;
+  if (pxPerSec > 12) return 10;
   return 30;
 }
 
-function formatTime(secs: number, fps = 60): string {
+function formatTime(secs: number, fps = 30): string {
   const totalSeconds = Math.max(0, secs);
   const h = Math.floor(totalSeconds / 3600);
   const m = Math.floor((totalSeconds % 3600) / 60);
   const s = Math.floor(totalSeconds % 60);
   const frames = Math.floor((totalSeconds % 1) * fps);
   return `${h.toString().padStart(2, "0")}:${m.toString().padStart(2, "0")}:${s.toString().padStart(2, "0")}:${frames.toString().padStart(2, "0")}`;
+}
+
+function formatTimeRuler(secs: number): string {
+  const totalSeconds = Math.max(0, secs);
+  const m = Math.floor(totalSeconds / 60);
+  const s = Math.floor(totalSeconds % 60);
+  const frac = totalSeconds % 1;
+  const mm = m.toString().padStart(2, "0");
+  const ss = s.toString().padStart(2, "0");
+  if (frac > 0.01) {
+    const frames = Math.round(frac * 30);
+    return `${mm}:${ss}:${frames.toString().padStart(2, "0")}f`;
+  }
+  return `${mm}:${ss}`;
 }

@@ -9,8 +9,8 @@ interface ZoomSettingsProps {
 export function ZoomSettings({ segment, onSegmentChange }: ZoomSettingsProps) {
   if (!segment) {
     return (
-      <div className="flex flex-col gap-4 p-4 rounded-lg border border-border bg-card">
-        <span className="text-sm text-muted-foreground">
+      <div className="flex flex-col gap-1.5">
+        <span className="text-xs text-[#6e6e6e]">
           Select a zoom segment on the timeline to edit its settings, or click the + Zoom button to create one.
         </span>
       </div>
@@ -22,10 +22,10 @@ export function ZoomSettings({ segment, onSegmentChange }: ZoomSettingsProps) {
   };
 
   return (
-    <div className="flex flex-col gap-4 p-4 rounded-lg border border-border bg-card">
-      <div className="flex items-center justify-between">
-        <span className="text-sm font-medium">Zoom Segment</span>
-        <span className="text-xs text-muted-foreground">
+    <div className="flex flex-col gap-1.5">
+      <div className="flex flex-col gap-0.5">
+        <span className="text-xs text-[#6e6e6e] leading-[26px] tracking-[0.18px]">Zoom Segment</span>
+        <span className="text-[10px] text-[#6e6e6e]">
           {segment.start_time.toFixed(1)}s – {segment.end_time.toFixed(1)}s
         </span>
       </div>

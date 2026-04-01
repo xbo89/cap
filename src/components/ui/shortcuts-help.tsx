@@ -1,5 +1,5 @@
-import { useState } from "react";
-import { Keyboard, X } from "lucide-react";
+import { useState, useEffect } from "react";
+import { X } from "lucide-react";
 
 const shortcuts = [
   { keys: "⌘⇧R", desc: "Start/Stop recording" },
@@ -14,17 +14,13 @@ const shortcuts = [
 export function ShortcutsHelp() {
   const [open, setOpen] = useState(false);
 
-  if (!open) {
-    return (
-      <button
-        onClick={() => setOpen(true)}
-        className="fixed bottom-3 right-3 p-2.5 rounded-md bg-secondary/80 text-muted-foreground hover:text-foreground transition-colors z-40"
-        title="Keyboard shortcuts"
-      >
-        <Keyboard className="h-5 w-5" />
-      </button>
-    );
-  }
+  useEffect(() => {
+    const handler = () => setOpen(true);
+    window.addEventListener("toggle-shortcuts-help", handler);
+    return () => window.removeEventListener("toggle-shortcuts-help", handler);
+  }, []);
+
+  if (!open) return null;
 
   return (
     <div className="fixed bottom-3 right-3 w-56 rounded-lg border border-border bg-card shadow-xl z-40">

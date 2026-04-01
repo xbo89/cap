@@ -3,7 +3,6 @@ import { listen } from "@tauri-apps/api/event";
 import { useAppStore } from "@/lib/store";
 import { ipc } from "@/lib/ipc";
 import type { Clip, Subtitle, SubtitleStyle, ZoomSegment, CaptureRegion } from "@/lib/ipc";
-import { Button } from "@/components/ui/button";
 import { PreviewCanvas } from "@/components/recording/PreviewCanvas";
 import { ZoomSettings } from "@/components/zoom/ZoomSettings";
 import { SubtitleProperties } from "@/components/subtitle/SubtitleProperties";
@@ -12,7 +11,8 @@ import { ExportPanel } from "@/components/export/ExportPanel";
 import { useKeyboard } from "@/hooks/useKeyboard";
 import { videoUrl } from "@/lib/video-url";
 import { useThumbnails } from "@/hooks/useThumbnails";
-import { PanelLeft, Download, Save, Check, Play, Pause, FolderOpen } from "lucide-react";
+import { Settings, Save, Check, Play, Pause, FolderOpen } from "lucide-react";
+import { ScrollArea } from "@/components/ui/scroll-area";
 
 export function EditorView() {
   const {
@@ -35,7 +35,10 @@ export function EditorView() {
   const [selectedSubtitleIndex, setSelectedSubtitleIndex] = useState<number | null>(null);
   const [captureRegion, setCaptureRegion] = useState<CaptureRegion | null>(null);
   const [saveStatus, setSaveStatus] = useState<"idle" | "saving" | "saved">("idle");
+  const [timelineHeight, setTimelineHeight] = useState(260);
+  const timelineDragRef = useRef<{ startY: number; startH: number } | null>(null);
   const videoRef = useRef<HTMLVideoElement>(null);
+  const bgCanvasRef = useRef<HTMLCanvasElement>(null);
   // Refs for playback loop (avoid stale closures in RAF)
   const clipsRef = useRef(clips);
   clipsRef.current = clips;
@@ -49,6 +52,38 @@ export function EditorView() {
     duration,
     ...clips.map(c => c.end_time),
   ) + 10; // 10s buffer for dragging room
+
+  // Capture first frame as background
+  useEffect(() => {
+    const video = videoRef.current;
+    const canvas = bgCanvasRef.current;
+    if (!video || !canvas) return;
+
+    const handleLoaded = () => {
+      // Seek to first frame
+      video.currentTime = 0;
+    };
+    const handleSeeked = () => {
+      const ctx = canvas.getContext("2d");
+      if (!ctx) return;
+      canvas.width = video.videoWidth || 1920;
+      canvas.height = video.videoHeight || 1080;
+      ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
+    };
+
+    video.addEventListener("loadeddata", handleLoaded);
+    video.addEventListener("seeked", handleSeeked);
+
+    // If video is already loaded
+    if (video.readyState >= 2) {
+      handleLoaded();
+    }
+
+    return () => {
+      video.removeEventListener("loadeddata", handleLoaded);
+      video.removeEventListener("seeked", handleSeeked);
+    };
+  }, [sessionId]);
 
   // Load session data — reset ALL state first to prevent stale data from previous session
   useEffect(() => {
@@ -362,6 +397,24 @@ export function EditorView() {
     },
   ]);
 
+  const handleResizeStart = useCallback((e: React.MouseEvent) => {
+    e.preventDefault();
+    timelineDragRef.current = { startY: e.clientY, startH: timelineHeight };
+    const onMove = (ev: MouseEvent) => {
+      if (!timelineDragRef.current) return;
+      const delta = timelineDragRef.current.startY - ev.clientY;
+      const newH = Math.max(120, Math.min(600, timelineDragRef.current.startH + delta));
+      setTimelineHeight(newH);
+    };
+    const onUp = () => {
+      timelineDragRef.current = null;
+      document.removeEventListener("mousemove", onMove);
+      document.removeEventListener("mouseup", onUp);
+    };
+    document.addEventListener("mousemove", onMove);
+    document.addEventListener("mouseup", onUp);
+  }, [timelineHeight]);
+
   if (!currentSession) {
     return (
       <div className="flex flex-col items-center justify-center h-full gap-4">
@@ -376,110 +429,151 @@ export function EditorView() {
   const selectedZoomSeg = selectedZoomSegmentIndex !== null ? zoomSegments[selectedZoomSegmentIndex] : null;
 
   return (
-    <div className="flex flex-col h-full">
-      {/* Top bar */}
-      <div className="flex items-center justify-between px-4 py-2 border-b border-border">
-        <div className="flex items-center gap-2">
-          <Button variant="ghost" size="sm" onClick={() => ipc.showSessionsBrowser()} title="Open recordings panel">
-            <PanelLeft className="h-4 w-4" />
-          </Button>
-          <div className="text-sm text-muted-foreground">
-            {currentSession.duration_secs.toFixed(1)}s |{" "}
-            {currentSession.file_size_mb.toFixed(1)} MB
-          </div>
-        </div>
-        <div className="flex items-center gap-2">
-          <Button variant="ghost" size="sm" onClick={() => sessionId && ipc.showInFinder(sessionId)} title="Open in Finder">
-            <FolderOpen className="h-4 w-4" />
-          </Button>
-          <Button variant="outline" size="sm" onClick={handleSave} disabled={saveStatus === "saving"}>
-            {saveStatus === "saved" ? (
-              <><Check className="mr-2 h-4 w-4 text-green-500" />Saved</>
-            ) : (
-              <><Save className="mr-2 h-4 w-4" />Save</>
-            )}
-          </Button>
-          <Button size="sm" onClick={() => setShowExport(true)}>
-            <Download className="mr-2 h-4 w-4" />
-            Export
-          </Button>
-        </div>
-      </div>
+    <div className="relative h-full w-full overflow-hidden">
+      {/* Background: video first frame, oversized to allow blur bleed */}
+      <canvas
+        ref={bgCanvasRef}
+        className="absolute top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 min-w-[calc(100%+500px)] min-h-[calc(100%+500px)] object-cover pointer-events-none"
+      />
 
-      {/* Main content: Sidebar + Preview + Settings */}
-      <div className="flex-1 flex min-h-0">
-        {/* Video preview */}
-        <div className="flex-1 flex flex-col items-center justify-center p-4 min-h-0">
-          <div className="flex-1 min-h-0 w-full max-w-3xl flex items-center justify-center">
-            <video key={sessionId} ref={videoRef} src={videoSrcUrl} className="hidden" playsInline preload="auto" />
-            <PreviewCanvas
-              key={sessionId}
-              videoRef={videoRef}
-              mouseEvents={mouseEvents}
-              clips={clips}
-              subtitles={subtitles}
-              timelineTime={currentTime}
-              isPlaying={isPlaying}
-              zoomSegments={zoomSegments}
-              captureRegion={captureRegion}
-              selectedSubtitleIndex={selectedSubtitleIndex}
-              onSubtitleSelect={handleSubtitleSelect}
-              onSubtitleStyleChange={handleSubtitleStyleChange}
-              width={1920}
-              height={1080}
-            />
-          </div>
-          <div className="flex-none flex justify-center mt-2">
+      {/* Glass morphism app frame */}
+      <div className="absolute inset-0 backdrop-blur-[60px] bg-[rgba(25,25,25,0.88)] flex flex-col overflow-hidden">
+        {/* Header */}
+        <div
+          data-tauri-drag-region
+          className="flex items-center justify-between px-4 py-3 border-b border-white/[0.08] shrink-0"
+        >
+          {/* Left: spacer for native traffic lights */}
+          <div className="w-[70px]" data-tauri-drag-region />
+
+          {/* Right: action buttons */}
+          <div className="flex items-center gap-2">
             <button
-              className="flex items-center gap-1.5 px-4 py-1.5 rounded-md bg-secondary text-foreground hover:bg-secondary/80 text-sm"
-              onClick={togglePlay}
+              className="flex items-center justify-center size-9 rounded-full border border-white/[0.08] hover:bg-white/[0.06] transition-colors"
+              onClick={() => sessionId && ipc.showInFinder(sessionId)}
+              title="Show in Finder"
             >
-              {isPlaying ? <Pause className="h-4 w-4" /> : <Play className="h-4 w-4" />}
-              {isPlaying ? "Pause" : "Play"}
+              <FolderOpen className="size-4 text-white/70" />
+            </button>
+            <button
+              className="flex items-center justify-center size-9 rounded-full border border-white/[0.08] hover:bg-white/[0.06] transition-colors"
+              onClick={() => ipc.showSessionsBrowser()}
+              title="Settings"
+            >
+              <Settings className="size-4 text-white/70" />
+            </button>
+            <button
+              className="flex items-center justify-center size-9 rounded-full border border-white/[0.08] hover:bg-white/[0.06] transition-colors"
+              onClick={handleSave}
+              disabled={saveStatus === "saving"}
+              title="Save"
+            >
+              {saveStatus === "saved" ? (
+                <Check className="size-4 text-green-400" />
+              ) : (
+                <Save className="size-4 text-white/70" />
+              )}
+            </button>
+            <button
+              className="flex items-center justify-center h-9 px-5 rounded-full bg-[#5b5bd6] hover:bg-[#6e6ede] text-white text-sm transition-colors"
+              onClick={() => setShowExport(true)}
+            >
+              Export
             </button>
           </div>
         </div>
 
-        {/* Right sidebar: only shown when an element is selected */}
-        {(selectedSub || selectedZoomSeg) && (
-          <div className="w-72 border-l border-border p-4 overflow-y-auto">
-            {selectedSub ? (
-              <SubtitleProperties
-                subtitle={selectedSub}
-                onTextChange={(text) => handleSubtitleTextChange(selectedSubtitleIndex!, text)}
-                onStyleChange={(style) => handleSubtitleStyleChange(selectedSubtitleIndex!, style)}
+        {/* Main content area */}
+        <div className="flex-1 flex min-h-[200px]">
+          {/* Left: Video preview + play controls */}
+          <div className="flex-1 flex flex-col min-h-0 overflow-hidden">
+            {/* Video preview area */}
+            <div className="flex-1 flex items-center justify-center p-4 min-h-0">
+              <video key={sessionId} ref={videoRef} src={videoSrcUrl} className="hidden" playsInline preload="auto" />
+              <PreviewCanvas
+                key={sessionId}
+                videoRef={videoRef}
+                mouseEvents={mouseEvents}
+                clips={clips}
+                subtitles={subtitles}
+                timelineTime={currentTime}
+                isPlaying={isPlaying}
+                zoomSegments={zoomSegments}
+                captureRegion={captureRegion}
+                selectedSubtitleIndex={selectedSubtitleIndex}
+                onSubtitleSelect={handleSubtitleSelect}
+                onSubtitleStyleChange={handleSubtitleStyleChange}
+                width={1920}
+                height={1080}
               />
-            ) : (
-              <ZoomSettings
-                segment={selectedZoomSeg}
-                onSegmentChange={handleZoomSegmentChange}
-              />
-            )}
-          </div>
-        )}
-      </div>
+            </div>
 
-      {/* Timeline */}
-      <div className="border-t border-border">
-        <Timeline
-          duration={timelineDuration}
-          sourceDuration={duration}
-          currentTime={currentTime}
-          waveform={waveform}
-          clips={clips}
-          thumbnails={thumbnails}
-          subtitles={subtitles}
-          selectedSubtitleIndex={selectedSubtitleIndex}
-          onSubtitleSelect={handleSubtitleSelect}
-          zoomSegments={zoomSegments}
-          selectedZoomSegmentIndex={selectedZoomSegmentIndex}
-          onZoomSegmentSelect={handleZoomSegmentSelect}
-          onZoomSegmentsChange={setZoomSegments}
-          onSeek={handleSeek}
-          onClipsChange={setClips}
-          onSubtitlesChange={setSubtitles}
-          onSplit={handleSplit}
-        />
+            {/* Play/Pause button */}
+            <div className="flex-none flex justify-center py-2">
+              <button
+                className="flex items-center justify-center size-9 rounded-full border border-white/[0.08] hover:bg-white/[0.06] transition-colors"
+                onClick={togglePlay}
+              >
+                {isPlaying ? (
+                  <Pause className="size-4 text-white/70" />
+                ) : (
+                  <Play className="size-4 text-white/70" />
+                )}
+              </button>
+            </div>
+          </div>
+
+          {/* Right sidebar: properties panel */}
+          {(selectedSub || selectedZoomSeg) && (
+            <div className="w-60 border-l border-white/[0.08]">
+              <ScrollArea className="h-full px-3 py-1">
+                {selectedSub ? (
+                  <SubtitleProperties
+                    subtitle={selectedSub}
+                    onTextChange={(text) => handleSubtitleTextChange(selectedSubtitleIndex!, text)}
+                    onStyleChange={(style) => handleSubtitleStyleChange(selectedSubtitleIndex!, style)}
+                  />
+                ) : (
+                  <ZoomSettings
+                    segment={selectedZoomSeg}
+                    onSegmentChange={handleZoomSegmentChange}
+                  />
+                )}
+              </ScrollArea>
+            </div>
+          )}
+        </div>
+
+        {/* Timeline resize handle */}
+        <div
+          className="shrink-0 h-1.5 cursor-row-resize border-t border-white/[0.08] flex items-center justify-center group hover:bg-white/[0.04] transition-colors"
+          onMouseDown={handleResizeStart}
+        >
+          <div className="w-8 h-0.5 rounded-full bg-white/20 group-hover:bg-white/40 transition-colors" />
+        </div>
+
+        {/* Timeline */}
+        <div className="shrink-0 overflow-y-auto" style={{ height: timelineHeight }}>
+          <Timeline
+            duration={timelineDuration}
+            sourceDuration={duration}
+            currentTime={currentTime}
+            waveform={waveform}
+            clips={clips}
+            thumbnails={thumbnails}
+            subtitles={subtitles}
+            selectedSubtitleIndex={selectedSubtitleIndex}
+            onSubtitleSelect={handleSubtitleSelect}
+            zoomSegments={zoomSegments}
+            selectedZoomSegmentIndex={selectedZoomSegmentIndex}
+            onZoomSegmentSelect={handleZoomSegmentSelect}
+            onZoomSegmentsChange={setZoomSegments}
+            onSeek={handleSeek}
+            onClipsChange={setClips}
+            onSubtitlesChange={setSubtitles}
+            onSplit={handleSplit}
+          />
+        </div>
       </div>
 
       {/* Export modal */}

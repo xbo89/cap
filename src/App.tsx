@@ -168,28 +168,20 @@ function App() {
 
   return (
     <div className="h-screen w-screen flex flex-col overflow-hidden select-none">
-      {/* Draggable titlebar region for macOS overlay style */}
-      <div
-        data-tauri-drag-region
-        className="h-8 shrink-0 flex items-center justify-center"
-      >
-        {view === "editor" && (
-          <span className="text-[11px] text-muted-foreground/50 pointer-events-none">
-            ScreenCap
-          </span>
-        )}
-      </div>
-
-      {/* Main content */}
-      <div className="flex-1 min-h-0">
-        {view === "recording" ? (
-          <div className="h-full flex items-center justify-center">
+      {view === "recording" ? (
+        <>
+          {/* Draggable titlebar region for macOS overlay style */}
+          <div
+            data-tauri-drag-region
+            className="h-8 shrink-0 flex items-center justify-center"
+          />
+          <div className="flex-1 min-h-0 flex items-center justify-center">
             <RecordingControls />
           </div>
-        ) : (
-          <EditorView />
-        )}
-      </div>
+        </>
+      ) : (
+        <EditorView />
+      )}
 
       <ShortcutsHelp />
     </div>

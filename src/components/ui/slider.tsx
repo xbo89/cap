@@ -24,10 +24,10 @@ export function Slider({
   return (
     <div className={cn("flex flex-col gap-1.5", className)}>
       <div className="flex items-center justify-between">
-        <label className="text-xs font-medium text-muted-foreground">
+        <label className="text-[10px] text-[#6e6e6e]">
           {label}
         </label>
-        <span className="text-xs text-muted-foreground tabular-nums">
+        <span className="text-[10px] text-[#6e6e6e] tabular-nums">
           {displayValue ?? value.toFixed(2)}
         </span>
       </div>
@@ -38,7 +38,7 @@ export function Slider({
         step={step}
         value={value}
         onChange={(e) => onChange(parseFloat(e.target.value))}
-        className="w-full h-1.5 bg-secondary rounded-full appearance-none cursor-pointer accent-primary"
+        className="w-full h-1.5 bg-white/[0.06] rounded-full appearance-none cursor-pointer accent-[#5b5bd6]"
       />
     </div>
   );
