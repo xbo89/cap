@@ -411,36 +411,37 @@ export function Timeline({
       ctx.lineWidth = 1;
       ctx.stroke();
 
-      // Focus icon (circle)
-      const cx = x1 + 20;
-      const cy = focusY + TRACK_HEIGHT / 2;
-      ctx.strokeStyle = "#5b5bd6";
-      ctx.lineWidth = 1.5;
-      ctx.beginPath();
-      ctx.arc(cx, cy, 6, 0, Math.PI * 2);
-      ctx.stroke();
-      // Crosshair
-      ctx.beginPath();
-      ctx.moveTo(cx - 3, cy);
-      ctx.lineTo(cx + 3, cy);
-      ctx.moveTo(cx, cy - 3);
-      ctx.lineTo(cx, cy + 3);
-      ctx.stroke();
+      // Spotlight icon (circle + rays) — positioned like subtitle icon
+      if (w > 30) {
+        const cx = x1 + 18;
+        const cy = focusY + TRACK_HEIGHT / 2;
+        const r = 5;
+        const color = isSelected ? "#b1a9ff" : "#6e6e6e";
+        ctx.strokeStyle = color;
+        ctx.lineWidth = 1.5;
+        ctx.beginPath();
+        ctx.arc(cx, cy, r, 0, Math.PI * 2);
+        ctx.stroke();
+        ctx.beginPath();
+        ctx.arc(cx, cy, 1.5, 0, Math.PI * 2);
+        ctx.fillStyle = color;
+        ctx.fill();
+        const rayIn = r + 2;
+        const rayOut = r + 5;
+        for (const [dx, dy] of [[1,1],[1,-1],[-1,1],[-1,-1]]) {
+          ctx.beginPath();
+          ctx.moveTo(cx + dx * rayIn * 0.707, cy + dy * rayIn * 0.707);
+          ctx.lineTo(cx + dx * rayOut * 0.707, cy + dy * rayOut * 0.707);
+          ctx.stroke();
+        }
+      }
 
-      // Progress bar
+      // Zoom level text — same font/position as subtitle text
       if (w > 50) {
-        const barX = x1 + 35;
-        const barW = w - 43;
-        const barY = focusY + TRACK_HEIGHT / 2 - 2;
-        // bg
-        roundRect(ctx, barX, barY, barW, 4, 2);
-        ctx.fillStyle = "rgba(255,255,255,0.08)";
-        ctx.fill();
-        // fill
-        const fillRatio = Math.min(1, (seg.zoom_level - 1) / 4);
-        roundRect(ctx, barX, barY, barW * fillRatio, 4, 2);
-        ctx.fillStyle = "#5b5bd6";
-        ctx.fill();
+        ctx.font = "12px -apple-system, 'Inter', sans-serif";
+        ctx.textAlign = "left";
+        ctx.fillStyle = isSelected ? "#b1a9ff" : "#6e6e6e";
+        ctx.fillText(`${seg.zoom_level.toFixed(1)}×`, x1 + 30, focusY + TRACK_HEIGHT / 2 + 4);
       }
 
       ctx.restore();
