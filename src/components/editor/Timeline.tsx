@@ -25,6 +25,7 @@ interface TimelineProps {
 }
 
 const TRACK_HEIGHT = 32;
+const CLIP_HEIGHT = 52; // Video clip element height
 const RULER_HEIGHT = 28;
 const TRACK_GAP = 6;
 
@@ -190,6 +191,11 @@ export function Timeline({
 
     // --- Video tracks ---
     const thumbInterval = 2;
+    const CLIP_RADIUS = 8;
+    const CLIP_PAD_X = 8;  // left/right inner padding (drag handle zone)
+    const CLIP_PAD_Y = 2;  // top/bottom inner padding
+    const HANDLE_LINE_H = 12;
+
     for (let ti = 0; ti < videoTrackIds.length; ti++) {
       const trackId = videoTrackIds[ti];
       const tY = videoTrackY(ti);
@@ -202,69 +208,79 @@ export function Timeline({
         const w = x2 - x1;
         if (x2 < 0 || x1 > containerWidth) continue;
 
+        const isSelected = selectedClip === i;
         const clipTop = tY;
-        const clipH = TRACK_HEIGHT + 20; // video clips are taller in design (52px)
 
-        // Clip background
         ctx.save();
-        roundRect(ctx, x1, clipTop, w, clipH, 8);
-        ctx.fillStyle = "#313131";
+
+        // Parent container background
+        roundRect(ctx, x1, clipTop, w, CLIP_HEIGHT, CLIP_RADIUS);
+        ctx.fillStyle = isSelected ? "#5B5BD6" : "#313131";
         ctx.fill();
 
-        // Thumbnail filmstrip inside clip
-        if (thumbnails && thumbnails.size > 0) {
-          ctx.save();
-          roundRect(ctx, x1 + 4, clipTop + 2, w - 8, clipH - 4, 6);
-          ctx.clip();
+        // Thumbnail filmstrip inside (inset by padding)
+        const innerX = x1 + CLIP_PAD_X;
+        const innerY = clipTop + CLIP_PAD_Y;
+        const innerW = w - CLIP_PAD_X * 2;
+        const innerH = CLIP_HEIGHT - CLIP_PAD_Y * 2;
 
-          // Inner colored bg
-          ctx.fillStyle = "#5b5bd6";
-          ctx.fillRect(x1 + 4, clipTop + 2, w - 8, clipH - 4);
+        if (innerW > 0) {
+          if (thumbnails && thumbnails.size > 0) {
+            ctx.save();
+            roundRect(ctx, innerX, innerY, innerW, innerH, CLIP_RADIUS);
+            ctx.clip();
 
-          const srcStart = clip.media_offset;
-          const srcEnd = clip.media_offset + (clip.end_time - clip.start_time);
-          const firstThumb = Math.floor(srcStart / thumbInterval) * thumbInterval;
-          for (let t = firstThumb; t < srcEnd; t += thumbInterval) {
-            const bmp = thumbnails.get(t);
-            if (!bmp) continue;
-            const tlTime = clip.start_time + (t - clip.media_offset);
-            const tx = timeToX(tlTime);
-            const tw = thumbInterval * pixelsPerSecond;
-            ctx.globalAlpha = 0.85;
-            ctx.drawImage(bmp, tx, clipTop + 2, tw, clipH - 4);
+            // Fill behind thumbnails
+            ctx.fillStyle = isSelected ? "#5B5BD6" : "#313131";
+            ctx.fillRect(innerX, innerY, innerW, innerH);
+
+            const srcStart = clip.media_offset;
+            const srcEnd = clip.media_offset + (clip.end_time - clip.start_time);
+            const firstThumb = Math.floor(srcStart / thumbInterval) * thumbInterval;
+            for (let t = firstThumb; t < srcEnd; t += thumbInterval) {
+              const bmp = thumbnails.get(t);
+              if (!bmp) continue;
+              const tlTime = clip.start_time + (t - clip.media_offset);
+              const tx = timeToX(tlTime);
+              const tw = thumbInterval * pixelsPerSecond;
+              ctx.globalAlpha = 0.9;
+              ctx.drawImage(bmp, tx, innerY, tw, innerH);
+            }
+            ctx.globalAlpha = 1.0;
+            ctx.restore();
+          } else {
+            // No thumbnails: fill inner with subtle accent
+            ctx.save();
+            roundRect(ctx, innerX, innerY, innerW, innerH, CLIP_RADIUS);
+            ctx.fillStyle = isSelected ? "#6B6BD8" : "#3a3a3a";
+            ctx.globalAlpha = 0.5;
+            ctx.fill();
+            ctx.globalAlpha = 1.0;
+            ctx.restore();
           }
-          ctx.globalAlpha = 1.0;
-          ctx.restore();
-        } else {
-          // No thumbnails: fill inner with accent
-          ctx.save();
-          roundRect(ctx, x1 + 4, clipTop + 2, w - 8, clipH - 4, 6);
-          ctx.fillStyle = "#5b5bd6";
-          ctx.globalAlpha = 0.4;
-          ctx.fill();
-          ctx.globalAlpha = 1.0;
-          ctx.restore();
         }
 
-        // Border
-        roundRect(ctx, x1, clipTop, w, clipH, 8);
-        ctx.strokeStyle = selectedClip === i ? "rgba(177,169,255,0.7)" : "rgba(255,255,255,0.16)";
+        // Parent container outside border (1px)
+        roundRect(ctx, x1 + 0.5, clipTop + 0.5, w - 1, CLIP_HEIGHT - 1, CLIP_RADIUS);
+        ctx.strokeStyle = isSelected ? "rgba(177, 169, 255, 0.7)" : "rgba(255, 255, 255, 0.16)";
         ctx.lineWidth = 1;
         ctx.stroke();
 
-        // Edge resize handles
-        ctx.fillStyle = "rgba(255,255,255,0.3)";
-        roundRect(ctx, x1, clipTop, 3, clipH, 1.5);
-        ctx.fill();
-        roundRect(ctx, x2 - 3, clipTop, 3, clipH, 1.5);
-        ctx.fill();
+        // Left drag handle line (centered in left padding zone)
+        const handleColor = isSelected ? "#B1A9FF" : "#6E6E6E";
+        const handleLineY = clipTop + (CLIP_HEIGHT - HANDLE_LINE_H) / 2;
+        ctx.fillStyle = handleColor;
+        ctx.fillRect(x1 + CLIP_PAD_X / 2 - 0.5, handleLineY, 1, HANDLE_LINE_H);
+
+        // Right drag handle line (centered in right padding zone)
+        ctx.fillRect(x2 - CLIP_PAD_X / 2 - 0.5, handleLineY, 1, HANDLE_LINE_H);
 
         ctx.restore();
       }
     }
 
     // Adjust Y calculation for video tracks being taller
-    const videoTrackTotalHeight = videoTrackCount * (TRACK_HEIGHT + 20 + TRACK_GAP);
+    const videoTrackTotalHeight = videoTrackCount * (CLIP_HEIGHT + TRACK_GAP);
     const postVideoY = RULER_HEIGHT + videoTrackTotalHeight;
 
     // --- Subtitle track ---
@@ -437,7 +453,7 @@ export function Timeline({
       const y = e.clientY - rect.top;
       const time = xToTime(x);
 
-      const videoTrackTotalHeight = videoTrackCount * (TRACK_HEIGHT + 20 + TRACK_GAP);
+      const videoTrackTotalHeight = videoTrackCount * (CLIP_HEIGHT + TRACK_GAP);
       const postVideoY = RULER_HEIGHT + videoTrackTotalHeight;
       const subY = postVideoY;
       const audioY = postVideoY + TRACK_HEIGHT + TRACK_GAP;
@@ -499,9 +515,9 @@ export function Timeline({
       }
 
       // Video tracks
-      const videoBottom = RULER_HEIGHT + videoTrackCount * (TRACK_HEIGHT + 20 + TRACK_GAP);
+      const videoBottom = RULER_HEIGHT + videoTrackCount * (CLIP_HEIGHT + TRACK_GAP);
       if (y >= RULER_HEIGHT && y < videoBottom) {
-        const clickedTrackIndex = Math.floor((y - RULER_HEIGHT) / (TRACK_HEIGHT + 20 + TRACK_GAP));
+        const clickedTrackIndex = Math.floor((y - RULER_HEIGHT) / (CLIP_HEIGHT + TRACK_GAP));
         const clickedTrackId = videoTrackIds[clickedTrackIndex] ?? 0;
 
         for (let i = 0; i < clips.length; i++) {
@@ -670,7 +686,7 @@ export function Timeline({
       const x = e.clientX - rect.left;
       const y = e.clientY - rect.top;
 
-      const videoTrackTotalHeight = videoTrackCount * (TRACK_HEIGHT + 20 + TRACK_GAP);
+      const videoTrackTotalHeight = videoTrackCount * (CLIP_HEIGHT + TRACK_GAP);
       const postVideoY = RULER_HEIGHT + videoTrackTotalHeight;
       const subY = postVideoY;
       const audioY = postVideoY + TRACK_HEIGHT + TRACK_GAP;
@@ -826,9 +842,9 @@ export function Timeline({
           const y = e.clientY - rect.top;
           const dropTime = xToTime(x);
           let targetTrackId = 0;
-          const videoBottom = RULER_HEIGHT + videoTrackCount * (TRACK_HEIGHT + 20 + TRACK_GAP);
+          const videoBottom = RULER_HEIGHT + videoTrackCount * (CLIP_HEIGHT + TRACK_GAP);
           if (y >= RULER_HEIGHT && y < videoBottom) {
-            const trackIdx = Math.floor((y - RULER_HEIGHT) / (TRACK_HEIGHT + 20 + TRACK_GAP));
+            const trackIdx = Math.floor((y - RULER_HEIGHT) / (CLIP_HEIGHT + TRACK_GAP));
             targetTrackId = videoTrackIds[trackIdx] ?? 0;
           } else {
             targetTrackId = Math.max(...videoTrackIds, 0) + 1;

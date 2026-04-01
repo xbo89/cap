@@ -23,8 +23,12 @@
   --radius: 0.5rem;
 }
 
-* {
-  border-color: var(--color-border);
+@layer base {
+  *,
+  ::after,
+  ::before {
+    border-color: var(--color-border);
+  }
 }
 
 body {
