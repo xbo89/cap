@@ -18,7 +18,14 @@ export function SessionSidebar({ currentSessionId, onOpenSession, standalone }: 
   const loadSessions = useCallback(async () => {
     try {
       const list = await ipc.listSessions();
-      setSessions(list);
+      // Deduplicate by session_id (backend may return duplicates)
+      const seen = new Set<string>();
+      const unique = list.filter((s) => {
+        if (seen.has(s.session_id)) return false;
+        seen.add(s.session_id);
+        return true;
+      });
+      setSessions(unique);
 
       // Generate thumbnails for sessions that don't have one
       for (const s of list) {

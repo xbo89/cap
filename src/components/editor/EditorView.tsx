@@ -300,60 +300,90 @@ export function EditorView() {
     setIsPlaying(prev => !prev);
   }, []);
 
-  // Playback engine: RAF-driven timeline clock, syncing video to source time.
-  // Plays through gaps as black frames (no skipping).
+  // Playback engine: let <video> drive timing via its own clock for smooth audio.
+  // RAF reads video.currentTime and maps it back to timeline time for the UI.
+  // We only seek when entering a new clip or when drift is excessive.
   useEffect(() => {
     if (!isPlaying) return;
     const video = videoRef.current;
     if (!video) return;
 
     let rafId: number;
-    let lastTs = performance.now();
-    let lastActiveClipStart = -1; // track clip transitions to re-seek
+    let lastActiveClipStart = -1;
+    let inGap = false;
+    let gapLastTs = 0; // for advancing timeline time through gaps
 
-    // Initial seek if starting inside a clip
-    const initClips = [...clipsRef.current].sort((a, b) => a.start_time - b.start_time);
-    const initClip = initClips.find(c => currentTimeRef.current >= c.start_time && currentTimeRef.current <= c.end_time);
+    const sorted = [...clipsRef.current].sort((a, b) => a.start_time - b.start_time);
+
+    // Find the active clip at current timeline time
+    const findClipAt = (tlTime: number) =>
+      sorted.find(c => tlTime >= c.start_time && tlTime <= c.end_time) ?? null;
+
+    // Initial seek + play
+    const initClip = findClipAt(currentTimeRef.current);
     if (initClip) {
       video.currentTime = initClip.media_offset + (currentTimeRef.current - initClip.start_time);
       video.play().catch(() => {});
       lastActiveClipStart = initClip.start_time;
+      inGap = false;
+    } else {
+      // Starting in a gap
+      video.pause();
+      inGap = true;
+      gapLastTs = performance.now();
     }
 
     const tick = (ts: number) => {
-      const dt = Math.min((ts - lastTs) / 1000, 0.1);
-      lastTs = ts;
+      const clips = [...clipsRef.current].sort((a, b) => a.start_time - b.start_time);
+      const lastClip = clips[clips.length - 1];
 
-      const sorted = [...clipsRef.current].sort((a, b) => a.start_time - b.start_time);
-      const newTime = currentTimeRef.current + dt;
+      let newTime: number;
 
-      // Check if past all content (stop exactly at last clip's end)
-      const lastClip = sorted[sorted.length - 1];
-      if (!lastClip || newTime >= (lastClip?.end_time ?? 0)) {
-        const endTime = lastClip?.end_time ?? 0;
+      if (inGap) {
+        // Advance timeline time manually during gaps (video is paused)
+        const dt = Math.min((ts - gapLastTs) / 1000, 0.1);
+        gapLastTs = ts;
+        newTime = currentTimeRef.current + dt;
+      } else {
+        // Derive timeline time from video's own currentTime (smooth, no jitter)
+        const activeClip = clips.find(c => c.start_time === lastActiveClipStart);
+        if (activeClip) {
+          const srcOffset = video.currentTime - activeClip.media_offset;
+          newTime = activeClip.start_time + srcOffset;
+        } else {
+          newTime = currentTimeRef.current;
+        }
+      }
+
+      // End of timeline
+      if (!lastClip || newTime >= lastClip.end_time) {
         video.pause();
-        currentTimeRef.current = endTime;
-        setCurrentTime(endTime);
+        currentTimeRef.current = lastClip?.end_time ?? 0;
+        setCurrentTime(currentTimeRef.current);
         setIsPlaying(false);
         return;
       }
 
-      const activeClip = sorted.find(c => newTime >= c.start_time && newTime <= c.end_time);
+      const activeClip = clips.find(c => newTime >= c.start_time && newTime <= c.end_time);
 
       if (activeClip) {
-        // Inside a clip: ensure video is playing at correct source position
-        const expectedSrc = activeClip.media_offset + (newTime - activeClip.start_time);
-
-        // Re-seek when entering a new clip or if drifted
-        if (lastActiveClipStart !== activeClip.start_time || Math.abs(video.currentTime - expectedSrc) > 0.2) {
-          video.currentTime = expectedSrc;
+        if (inGap || lastActiveClipStart !== activeClip.start_time) {
+          // Entering a new clip (from gap or different clip): seek once
+          const seekTo = activeClip.media_offset + (newTime - activeClip.start_time);
+          video.currentTime = seekTo;
+          video.play().catch(() => {});
           lastActiveClipStart = activeClip.start_time;
+          inGap = false;
         }
-        if (video.paused) video.play().catch(() => {});
+        // Within the same clip: let video play freely (no seeking!)
       } else {
-        // In a gap: pause video, preview shows black
-        if (!video.paused) video.pause();
-        lastActiveClipStart = -1;
+        // In a gap
+        if (!inGap) {
+          video.pause();
+          inGap = true;
+          gapLastTs = ts;
+          lastActiveClipStart = -1;
+        }
       }
 
       currentTimeRef.current = newTime;
@@ -624,9 +654,9 @@ export function EditorView() {
           <div className="flex-1 flex flex-col min-h-0 overflow-hidden">
             {/* Video preview area */}
             <div className="flex-1 flex items-center justify-center p-4 min-h-0">
-              <video key={sessionId} ref={videoRef} src={videoSrcUrl} className="hidden" playsInline preload="auto" />
+              <video key={`video-${sessionId}`} ref={videoRef} src={videoSrcUrl} className="hidden" playsInline preload="auto" />
               <PreviewCanvas
-                key={sessionId}
+                key={`preview-${sessionId}`}
                 videoRef={videoRef}
                 mouseEvents={mouseEvents}
                 clips={clips}
@@ -710,6 +740,21 @@ export function EditorView() {
             onSplit={handleSplit}
             showGrid={showGrid}
             onShowGridChange={setShowGrid}
+            getMouseAtSourceTime={(tlTime) => {
+              if (mouseEvents.length === 0) return null;
+              // Convert timeline time → source time, then look up mouse event
+              const srcTime = timelineToSource(tlTime);
+              if (srcTime === null) return null;
+              const timeUs = srcTime * 1_000_000;
+              let lo = 0, hi = mouseEvents.length - 1;
+              while (lo < hi) {
+                const mid = (lo + hi) >> 1;
+                if (mouseEvents[mid].timestamp_us < timeUs) lo = mid + 1;
+                else hi = mid;
+              }
+              const ev = mouseEvents[lo];
+              return ev ? { x: ev.x, y: ev.y } : null;
+            }}
           />
         </div>
       </div>

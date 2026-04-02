@@ -5,15 +5,6 @@
  * Supports per-segment zoom with critically-damped spring transitions.
  */
 
-export interface ZoomConfig {
-  /** Zoom magnification (e.g. 2.0 = 200%) */
-  zoomLevel: number;
-  /** Follow speed: 0 = no follow, 1 = instant snap */
-  followSpeed: number;
-  /** Min distance (px) from mouse to viewport edge */
-  padding: number;
-}
-
 // Import and re-export from ipc to keep a single source of truth
 import type { ZoomSegment } from "./ipc";
 export type { ZoomSegment };
@@ -24,12 +15,6 @@ export interface Viewport {
   srcW: number;
   srcH: number;
 }
-
-export const defaultZoomConfig: ZoomConfig = {
-  zoomLevel: 2.0,
-  followSpeed: 0.15,
-  padding: 100.0,
-};
 
 export const defaultZoomSegment: Omit<ZoomSegment, "start_time" | "end_time"> = {
   zoom_level: 2.0,
@@ -82,64 +67,119 @@ export function findActiveSegment(segments: ZoomSegment[], time: number): ZoomSe
   return null;
 }
 
+/**
+ * Zoom states:
+ * - idle: no zoom, center = frame center
+ * - active: inside a zoom segment (locked or following mouse)
+ * - recovering: segment ended, center smoothly returns to frame center
+ *               while spring eases zoomLevel back to 1.0
+ */
+type ZoomState = "idle" | "active" | "recovering";
+
 export class ZoomCalculator {
   private frameWidth: number;
   private frameHeight: number;
   private centerX: number;
   private centerY: number;
   private initialized = false;
+  private state: ZoomState = "idle";
+
+  /** The raw target set by snapCenter — preserved across clamp changes. */
+  private targetX: number;
+  private targetY: number;
+
+  private static RECOVERY_SPEED = 0.12;
 
   constructor(frameWidth: number, frameHeight: number) {
     this.frameWidth = frameWidth;
     this.frameHeight = frameHeight;
     this.centerX = frameWidth / 2;
     this.centerY = frameHeight / 2;
+    this.targetX = frameWidth / 2;
+    this.targetY = frameHeight / 2;
   }
 
-  /**
-   * Compute viewport for a frame.
-   * @param mouseX Mouse X position (screen coords)
-   * @param mouseY Mouse Y position (screen coords)
-   * @param dt Time delta in seconds since previous frame
-   * @param zoomLevel Current (spring-interpolated) zoom level
-   * @param followSpeed Follow speed for exponential smoothing
-   */
-  /**
-   * @param anchorPos If provided, zoom anchors to this fixed point (no mouse follow).
-   */
-  compute(mouseX: number, mouseY: number, dt: number, zoomLevel: number, followSpeed: number, anchorPos?: { x: number; y: number }): Viewport {
-    // Determine focus point: anchor or mouse
-    const focusX = anchorPos ? anchorPos.x : mouseX;
-    const focusY = anchorPos ? anchorPos.y : mouseY;
-
-    if (!this.initialized) {
-      this.centerX = focusX;
-      this.centerY = focusY;
-      this.initialized = true;
-    }
-
-    // Exponential smoothing - must match Rust: alpha = 1 - e^(-followSpeed * dt * 60)
-    const speed = anchorPos ? Math.min(followSpeed, 0.03) : followSpeed; // anchored = very slow transition
-    const alpha = 1.0 - Math.exp(-speed * dt * 60.0);
-    this.centerX += (focusX - this.centerX) * alpha;
-    this.centerY += (focusY - this.centerY) * alpha;
-
-    // Viewport size
+  compute(focusX: number, focusY: number, dt: number, zoomLevel: number, followMouse: boolean, followSpeed: number): Viewport {
     const vw = this.frameWidth / zoomLevel;
     const vh = this.frameHeight / zoomLevel;
 
-    // Top-left, clamped to frame
-    let sx = this.centerX - vw / 2;
-    let sy = this.centerY - vh / 2;
-    sx = Math.max(0, Math.min(sx, this.frameWidth - vw));
-    sy = Math.max(0, Math.min(sy, this.frameHeight - vh));
+    // Valid center range for current zoom level
+    const minCX = vw / 2;
+    const maxCX = this.frameWidth - vw / 2;
+    const minCY = vh / 2;
+    const maxCY = this.frameHeight - vh / 2;
 
-    return { srcX: sx, srcY: sy, srcW: vw, srcH: vh };
+    if (this.state === "active") {
+      if (followMouse) {
+        // Follow mode: smooth toward current mouse position
+        const tx = Math.max(minCX, Math.min(focusX, maxCX));
+        const ty = Math.max(minCY, Math.min(focusY, maxCY));
+
+        if (!this.initialized) {
+          this.centerX = tx;
+          this.centerY = ty;
+          this.initialized = true;
+        }
+
+        const alpha = 1.0 - Math.exp(-followSpeed * dt * 60.0);
+        this.centerX += (tx - this.centerX) * alpha;
+        this.centerY += (ty - this.centerY) * alpha;
+      } else {
+        // Locked mode: clamp the stored target to the current valid range,
+        // then snap center there. As zoom increases the range widens,
+        // so center progressively reaches the true target.
+        this.centerX = Math.max(minCX, Math.min(this.targetX, maxCX));
+        this.centerY = Math.max(minCY, Math.min(this.targetY, maxCY));
+      }
+    } else if (this.state === "recovering") {
+      const midX = this.frameWidth / 2;
+      const midY = this.frameHeight / 2;
+      const alpha = 1.0 - Math.exp(-ZoomCalculator.RECOVERY_SPEED * dt * 60.0);
+      this.centerX += (midX - this.centerX) * alpha;
+      this.centerY += (midY - this.centerY) * alpha;
+
+      if (zoomLevel < 1.01) {
+        this.state = "idle";
+        this.centerX = midX;
+        this.centerY = midY;
+        this.initialized = false;
+      }
+    }
+
+    // Final clamp (safety net for follow/recovery modes)
+    this.centerX = Math.max(minCX, Math.min(this.centerX, maxCX));
+    this.centerY = Math.max(minCY, Math.min(this.centerY, maxCY));
+
+    return {
+      srcX: this.centerX - vw / 2,
+      srcY: this.centerY - vh / 2,
+      srcW: vw,
+      srcH: vh,
+    };
   }
 
+  /** Snap center to a point and enter active state. */
+  snapCenter(x: number, y: number) {
+    this.targetX = x;
+    this.targetY = y;
+    this.centerX = x;
+    this.centerY = y;
+    this.initialized = true;
+    this.state = "active";
+  }
+
+  /** Begin smooth recovery back to frame center. */
+  beginRecovery() {
+    this.state = "recovering";
+  }
+
+  /** Hard reset to idle. */
   reset() {
     this.initialized = false;
+    this.state = "idle";
     this.centerX = this.frameWidth / 2;
     this.centerY = this.frameHeight / 2;
+    this.targetX = this.frameWidth / 2;
+    this.targetY = this.frameHeight / 2;
   }
 }

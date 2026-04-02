@@ -24,6 +24,8 @@ interface TimelineProps {
   onSplit: () => void;
   showGrid?: boolean;
   onShowGridChange?: (show: boolean) => void;
+  /** Returns the mouse screen position at a given source time (seconds), or null. */
+  getMouseAtSourceTime?: (sourceTimeSecs: number) => { x: number; y: number } | null;
   className?: string;
 }
 
@@ -57,7 +59,8 @@ type DragType =
 
 /** Draw rounded rect on canvas */
 function roundRect(ctx: CanvasRenderingContext2D, x: number, y: number, w: number, h: number, r: number) {
-  r = Math.min(r, w / 2, h / 2);
+  if (w <= 0 || h <= 0) return;
+  r = Math.max(0, Math.min(r, w / 2, h / 2));
   ctx.beginPath();
   ctx.moveTo(x + r, y);
   ctx.lineTo(x + w - r, y);
@@ -91,6 +94,7 @@ export function Timeline({
   onSplit,
   showGrid: showGridProp,
   onShowGridChange,
+  getMouseAtSourceTime,
   className,
 }: TimelineProps) {
   const containerRef = useRef<HTMLDivElement>(null);
@@ -156,8 +160,11 @@ export function Timeline({
     if (!ctx) return;
 
     const dpr = window.devicePixelRatio || 1;
-    canvas.width = containerWidth * dpr;
-    canvas.height = canvasHeight * dpr;
+    const cw = Math.round(containerWidth * dpr);
+    const ch = Math.round(canvasHeight * dpr);
+    if (cw <= 0 || ch <= 0 || !isFinite(cw) || !isFinite(ch)) return;
+    canvas.width = cw;
+    canvas.height = ch;
     ctx.scale(dpr, dpr);
     ctx.clearRect(0, 0, containerWidth, canvasHeight);
 
@@ -255,6 +262,7 @@ export function Timeline({
               const tx = timeToX(tlTime);
               const tw = thumbInterval * pixelsPerSecond;
 
+              if (tw <= 0 || innerH <= 0) continue;
               // "Cover" draw: scale bitmap to fill tw×innerH without stretching
               const bmpAspect = bmp.width / bmp.height;
               const slotAspect = tw / innerH;
@@ -268,6 +276,7 @@ export function Timeline({
                 sh = bmp.width / slotAspect;
                 sy = (bmp.height - sh) / 2;
               }
+              if (sw <= 0 || sh <= 0) continue;
               ctx.globalAlpha = 0.9;
               ctx.drawImage(bmp, sx, sy, sw, sh, tx, innerY, tw, innerH);
             }
@@ -785,14 +794,18 @@ export function Timeline({
     const newEnd = Math.min(currentTime + segDuration, duration);
     const overlaps = zoomSegments.some(s => newStart < s.end_time && newEnd > s.start_time);
     if (overlaps) return;
+    // Try to anchor at the mouse position at segment start time
+    const mousePos = getMouseAtSourceTime?.(currentTime);
     const newSeg: ZoomSegment = {
       start_time: newStart, end_time: newEnd,
       zoom_level: 2.0, follow_speed: 0.15, padding: 100,
+      follow_mouse: false,
+      ...(mousePos ? { anchor_x: mousePos.x, anchor_y: mousePos.y } : {}),
     };
     const newSegs = [...zoomSegments, newSeg].sort((a, b) => a.start_time - b.start_time);
     onZoomSegmentsChange(newSegs);
     onZoomSegmentSelect(newSegs.findIndex(s => s.start_time === newStart));
-  }, [currentTime, duration, zoomSegments, onZoomSegmentsChange, onZoomSegmentSelect]);
+  }, [currentTime, duration, zoomSegments, onZoomSegmentsChange, onZoomSegmentSelect, getMouseAtSourceTime]);
 
   const hasSelection = selectedClip !== null || selectedSubtitleIndex !== null || selectedZoomSegmentIndex !== null;
 

@@ -49,6 +49,7 @@ export function PreviewCanvas({
   const animFrameRef = useRef<number>(0);
   const zoomCalcRef = useRef<ZoomCalculator | null>(null);
   const springRef = useRef(new CriticallyDampedSpring(1.0, 10.0));
+  const prevSegRef = useRef<ZoomSegment | null>(null);
   const subtitleBoundsRef = useRef<SubtitleBounds[]>([]);
   const tlTimeRef = useRef(timelineTime ?? 0);
   if (timelineTime !== undefined) tlTimeRef.current = timelineTime;
@@ -256,28 +257,54 @@ export function PreviewCanvas({
       const activeSeg = findActiveSegment(zoomSegments, tlTime);
       const targetLevel = activeSeg ? activeSeg.zoom_level : 1.0;
       const followSpeed = activeSeg ? activeSeg.follow_speed : 0.15;
+      const followMouse = activeSeg ? (activeSeg.follow_mouse === true) : false;
       const currentLevel = springRef.current.advance(targetLevel, 1 / 60);
 
       const currentTimeUs = video.currentTime * 1_000_000;
       const mouseEvent = findMouseEvent(currentTimeUs);
 
+      // Detect segment change: snap center to focus point on activation
+      const prevSeg = prevSegRef.current;
+      const segChanged = (activeSeg !== null && prevSeg === null) ||
+        (activeSeg !== null && prevSeg !== null && (activeSeg.start_time !== prevSeg.start_time || activeSeg.end_time !== prevSeg.end_time));
+      const segEnded = activeSeg === null && prevSeg !== null;
+      prevSegRef.current = activeSeg;
+
+      // Scale factor: convert logical points → video pixels
+      const regionW = captureRegion?.width ?? 0;
+      const sf = (regionW > 0 && vw > 0) ? (vw / regionW) : window.devicePixelRatio || 2;
+      const regionX = captureRegion?.x ?? 0;
+      const regionY = captureRegion?.y ?? 0;
+
+      if (segChanged && activeSeg && zoomCalcRef.current) {
+        const hasAnchor = activeSeg.anchor_x != null && activeSeg.anchor_y != null;
+        if (hasAnchor) {
+          // Explicit anchor: zoom to that screen position
+          const snapX = (activeSeg.anchor_x! - regionX) * sf;
+          const snapY = (activeSeg.anchor_y! - regionY) * sf;
+          zoomCalcRef.current.snapCenter(snapX, snapY);
+        } else if (mouseEvent) {
+          // No anchor: use current mouse position from recording data
+          const snapX = (mouseEvent.x - regionX) * sf;
+          const snapY = (mouseEvent.y - regionY) * sf;
+          zoomCalcRef.current.snapCenter(snapX, snapY);
+        } else {
+          // No anchor, no mouse data: center zoom
+          zoomCalcRef.current.snapCenter(vw / 2, vh / 2);
+        }
+      }
+
+      // When zoom segment ends, begin smooth recovery back to frame center
+      if (segEnded && zoomCalcRef.current) {
+        zoomCalcRef.current.beginRecovery();
+      }
+
       // Always use viewport-based rendering to avoid jump at zoom transitions.
       // When currentLevel ≈ 1.0, viewport covers the full frame seamlessly.
       if (mouseEvent) {
-        const sf = 2;
-        // Mouse events are in absolute screen coordinates.
-        // Subtract capture region offset to get video-local coordinates.
-        const regionX = captureRegion?.x ?? 0;
-        const regionY = captureRegion?.y ?? 0;
         const mpx = (mouseEvent.x - regionX) * sf;
         const mpy = (mouseEvent.y - regionY) * sf;
-        // Build anchor position if segment uses fixed focus (follow_mouse = false or default)
-        const useAnchor = activeSeg && !activeSeg.follow_mouse && activeSeg.anchor_x != null && activeSeg.anchor_y != null;
-        const anchorPos = useAnchor ? {
-          x: ((activeSeg!.anchor_x! - (captureRegion?.x ?? 0)) * sf),
-          y: ((activeSeg!.anchor_y! - (captureRegion?.y ?? 0)) * sf),
-        } : undefined;
-        const vp = zoomCalcRef.current.compute(mpx, mpy, 1 / 60, Math.max(currentLevel, 1.0), followSpeed, anchorPos);
+        const vp = zoomCalcRef.current.compute(mpx, mpy, 1 / 60, Math.max(currentLevel, 1.0), followMouse, followSpeed);
         ctx.drawImage(video, vp.srcX, vp.srcY, vp.srcW, vp.srcH, 0, 0, canvas.width, canvas.height);
         const cx = ((mpx - vp.srcX) / vp.srcW) * canvas.width;
         const cy = ((mpy - vp.srcY) / vp.srcH) * canvas.height;

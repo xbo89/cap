@@ -57,6 +57,8 @@ function App() {
       region: { x: number; y: number; width: number; height: number };
     }>("request-start-recording", async (event) => {
       const store = useAppStore.getState();
+      if (store.isRecording) return; // Already recording — ignore duplicate event
+      store.setRecording(true); // Set immediately to prevent race with duplicate events
       const config = event.payload;
       try {
         // Auto-save current project if editor is open before starting new recording
@@ -66,8 +68,8 @@ function App() {
         // Brief delay to ensure overlay windows are fully closed
         await new Promise((r) => setTimeout(r, 50));
         await ipc.startRecording(config);
-        store.setRecording(true);
       } catch (e) {
+        store.setRecording(false); // Revert on failure
         console.error("Start recording failed:", e);
       }
     }).then((u) => unlisteners.push(u));

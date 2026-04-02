@@ -15,7 +15,11 @@ export function useGlobalShortcuts() {
           // Check backend recording status (authoritative) instead of local state
           const status = await ipc.getRecordingStatus();
           if (!status.is_recording) {
-            await ipc.showRegionSelector();
+            try {
+              await ipc.showRegionSelector();
+            } catch (e) {
+              console.warn("showRegionSelector failed (overlay may already exist):", e);
+            }
           }
         });
         shortcuts.push("CommandOrControl+Shift+5");
@@ -49,7 +53,11 @@ export function useGlobalShortcuts() {
             }
           } else {
             // Open region selector
-            await ipc.showRegionSelector();
+            try {
+              await ipc.showRegionSelector();
+            } catch (e) {
+              console.warn("showRegionSelector failed (overlay may already exist):", e);
+            }
           }
         });
         shortcuts.push("CommandOrControl+Shift+R");

@@ -66,6 +66,8 @@ impl Recorder {
             "session_dir": session_dir.to_str().unwrap(),
             "fps": fps,
             "shows_cursor": config.capture_mouse,
+            "capture_audio": config.capture_audio,
+            "capture_mic": config.capture_mic,
             "region": region,
         });
         let config_path = session_dir.join("recorder_config.json");
@@ -298,6 +300,8 @@ struct RecorderConfig: Codable {
     let session_dir: String
     let fps: Int
     let shows_cursor: Bool
+    let capture_audio: Bool?
+    let capture_mic: Bool?
     let region: Region?
 
     struct Region: Codable {
@@ -328,12 +332,22 @@ class Recorder: NSObject, SCStreamOutput {
     var stream: SCStream?
     var writer: AVAssetWriter?
     var videoInput: AVAssetWriterInput?
+    var audioInput: AVAssetWriterInput?
+    var micInput: AVAssetWriterInput?
     var adaptor: AVAssetWriterInputPixelBufferAdaptor?
     var sessionStarted = false
     var frameCount = 0
+    var audioSampleCount = 0
     var errorLogged = false
     let outputURL: URL
     var stopping = false
+    var captureAudio = false
+    var captureMic = false
+
+    // Microphone capture via AVCaptureSession
+    var micSession: AVCaptureSession?
+    var micWriter: AVAssetWriterInput?
+    var micOutputDelegate: MicDelegate?
 
     init(outputPath: String) {
         self.outputURL = URL(fileURLWithPath: outputPath)
@@ -341,6 +355,9 @@ class Recorder: NSObject, SCStreamOutput {
     }
 
     func start(config cfg: RecorderConfig) async throws {
+        captureAudio = cfg.capture_audio ?? false
+        captureMic = cfg.capture_mic ?? false
+
         let content = try await SCShareableContent.excludingDesktopWindows(false, onScreenWindowsOnly: true)
         guard !content.displays.isEmpty else {
             fputs("ERROR: No display found\n", stderr)
@@ -349,7 +366,6 @@ class Recorder: NSObject, SCStreamOutput {
 
         var display = content.displays[0]
 
-        // If region specified, find the display containing the region center
         if let region = cfg.region {
             let regionCenter = CGPoint(x: region.x + region.width / 2, y: region.y + region.height / 2)
             for d in content.displays {
@@ -382,25 +398,31 @@ class Recorder: NSObject, SCStreamOutput {
         streamConfig.minimumFrameInterval = CMTime(value: 1, timescale: CMTimeScale(cfg.fps))
         streamConfig.pixelFormat = kCVPixelFormatType_32BGRA
         streamConfig.showsCursor = cfg.shows_cursor
-        // Use Display P3 color space to match macOS display output and preserve color accuracy
         streamConfig.colorSpaceName = CGColorSpace.displayP3
+
+        // Enable system audio capture via ScreenCaptureKit
+        if captureAudio {
+            streamConfig.capturesAudio = true
+            streamConfig.sampleRate = 48000
+            streamConfig.channelCount = 2
+        }
 
         try? FileManager.default.removeItem(at: outputURL)
         writer = try AVAssetWriter(outputURL: outputURL, fileType: .mp4)
 
-        let settings: [String: Any] = [
+        // Video input
+        let videoSettings: [String: Any] = [
             AVVideoCodecKey: AVVideoCodecType.h264,
             AVVideoWidthKey: streamConfig.width,
             AVVideoHeightKey: streamConfig.height,
             AVVideoCompressionPropertiesKey: [AVVideoAverageBitRateKey: 8_000_000],
-            // Embed Display P3 color metadata so players render colors correctly
             AVVideoColorPropertiesKey: [
                 AVVideoColorPrimariesKey: AVVideoColorPrimaries_P3_D65,
                 AVVideoTransferFunctionKey: AVVideoTransferFunction_ITU_R_709_2,
                 AVVideoYCbCrMatrixKey: AVVideoYCbCrMatrix_ITU_R_709_2,
             ]
         ]
-        videoInput = AVAssetWriterInput(mediaType: .video, outputSettings: settings)
+        videoInput = AVAssetWriterInput(mediaType: .video, outputSettings: videoSettings)
         videoInput?.expectsMediaDataInRealTime = true
 
         adaptor = AVAssetWriterInputPixelBufferAdaptor(
@@ -411,8 +433,50 @@ class Recorder: NSObject, SCStreamOutput {
                 kCVPixelBufferHeightKey as String: streamConfig.height,
             ]
         )
-
         writer?.add(videoInput!)
+
+        // Audio input (system audio from ScreenCaptureKit)
+        if captureAudio {
+            let audioSettings: [String: Any] = [
+                AVFormatIDKey: kAudioFormatMPEG4AAC,
+                AVSampleRateKey: 48000,
+                AVNumberOfChannelsKey: 2,
+                AVEncoderBitRateKey: 128000,
+            ]
+            audioInput = AVAssetWriterInput(mediaType: .audio, outputSettings: audioSettings)
+            audioInput?.expectsMediaDataInRealTime = true
+            writer?.add(audioInput!)
+        }
+
+        // Microphone input (separate AVCaptureSession)
+        if captureMic {
+            let micAudioSettings: [String: Any] = [
+                AVFormatIDKey: kAudioFormatMPEG4AAC,
+                AVSampleRateKey: 48000,
+                AVNumberOfChannelsKey: 1,
+                AVEncoderBitRateKey: 64000,
+            ]
+            micInput = AVAssetWriterInput(mediaType: .audio, outputSettings: micAudioSettings)
+            micInput?.expectsMediaDataInRealTime = true
+            writer?.add(micInput!)
+
+            // Set up AVCaptureSession for mic
+            let session = AVCaptureSession()
+            if let micDevice = AVCaptureDevice.default(for: .audio),
+               let micDeviceInput = try? AVCaptureDeviceInput(device: micDevice) {
+                session.addInput(micDeviceInput)
+                let audioOutput = AVCaptureAudioDataOutput()
+                let delegate = MicDelegate(recorder: self)
+                audioOutput.setSampleBufferDelegate(delegate, queue: DispatchQueue(label: "mic-queue"))
+                session.addOutput(audioOutput)
+                micSession = session
+                micOutputDelegate = delegate
+                fputs("Microphone capture configured\n", stderr)
+            } else {
+                fputs("Warning: No microphone available\n", stderr)
+            }
+        }
+
         writer?.startWriting()
 
         if writer?.status == .failed {
@@ -422,42 +486,69 @@ class Recorder: NSObject, SCStreamOutput {
 
         stream = SCStream(filter: filter, configuration: streamConfig, delegate: nil)
         try stream?.addStreamOutput(self, type: .screen, sampleHandlerQueue: .global())
+        if captureAudio {
+            try stream?.addStreamOutput(self, type: .audio, sampleHandlerQueue: DispatchQueue(label: "audio-queue"))
+        }
         try await stream?.startCapture()
 
+        // Start mic capture after stream is running
+        micSession?.startRunning()
+
         FileManager.default.createFile(atPath: readyFlag, contents: nil)
-        fputs("Recording started (display: \(display.width)x\(display.height), fps: \(cfg.fps))\n", stderr)
+        let audioDesc = captureAudio ? ", system audio: ON" : ""
+        let micDesc = captureMic ? ", mic: ON" : ""
+        fputs("Recording started (display: \(display.width)x\(display.height), fps: \(cfg.fps)\(audioDesc)\(micDesc))\n", stderr)
     }
 
     func stream(_ s: SCStream, didOutputSampleBuffer buf: CMSampleBuffer, of type: SCStreamOutputType) {
-        guard type == .screen, !stopping else { return }
+        guard !stopping else { return }
         guard buf.isValid else { return }
-        guard let videoInput = videoInput, videoInput.isReadyForMoreMediaData else { return }
         guard let w = writer, w.status == .writing else { return }
 
-        guard let pixelBuffer = CMSampleBufferGetImageBuffer(buf) else { return }
         let pts = CMSampleBufferGetPresentationTimeStamp(buf)
 
-        if !sessionStarted {
-            w.startSession(atSourceTime: pts)
-            sessionStarted = true
-        }
+        if type == .screen {
+            guard let videoInput = videoInput, videoInput.isReadyForMoreMediaData else { return }
+            guard let pixelBuffer = CMSampleBufferGetImageBuffer(buf) else { return }
 
-        if let adaptor = adaptor {
-            if !adaptor.append(pixelBuffer, withPresentationTime: pts) {
-                if !errorLogged {
-                    fputs("ERROR: Adaptor append failed. Writer status: \(w.status.rawValue) error: \(w.error?.localizedDescription ?? "none")\n", stderr)
-                    errorLogged = true
-                }
-                return
+            if !sessionStarted {
+                w.startSession(atSourceTime: pts)
+                sessionStarted = true
             }
-        } else {
-            if !videoInput.append(buf) { return }
+
+            if let adaptor = adaptor {
+                if !adaptor.append(pixelBuffer, withPresentationTime: pts) {
+                    if !errorLogged {
+                        fputs("ERROR: Adaptor append failed. Writer status: \(w.status.rawValue) error: \(w.error?.localizedDescription ?? "none")\n", stderr)
+                        errorLogged = true
+                    }
+                    return
+                }
+            } else {
+                if !videoInput.append(buf) { return }
+            }
+            frameCount += 1
+        } else if type == .audio {
+            guard sessionStarted else { return }
+            guard let audioInput = audioInput, audioInput.isReadyForMoreMediaData else { return }
+            if audioInput.append(buf) {
+                audioSampleCount += 1
+            }
         }
-        frameCount += 1
+    }
+
+    func appendMicSample(_ buf: CMSampleBuffer) {
+        guard !stopping, sessionStarted else { return }
+        guard let w = writer, w.status == .writing else { return }
+        guard let micInput = micInput, micInput.isReadyForMoreMediaData else { return }
+        micInput.append(buf)
     }
 
     func stopSync() {
-        fputs("Stopping capture (frames: \(frameCount))...\n", stderr)
+        fputs("Stopping capture (frames: \(frameCount), audio samples: \(audioSampleCount))...\n", stderr)
+
+        micSession?.stopRunning()
+        micSession = nil
 
         if let s = stream {
             var captureStopped = false
@@ -477,6 +568,8 @@ class Recorder: NSObject, SCStreamOutput {
         Thread.sleep(forTimeInterval: 0.1)
 
         videoInput?.markAsFinished()
+        audioInput?.markAsFinished()
+        micInput?.markAsFinished()
 
         guard let w = writer, w.status == .writing else {
             fputs("ERROR: Writer not in writing state\n", stderr)
@@ -492,13 +585,25 @@ class Recorder: NSObject, SCStreamOutput {
         }
 
         if w.status == .completed {
-            fputs("Video finalized OK. Frames: \(frameCount)\n", stderr)
+            fputs("Video finalized OK. Frames: \(frameCount), audio samples: \(audioSampleCount)\n", stderr)
             let fd = open(outputURL.path, O_WRONLY)
             if fd >= 0 {
                 fsync(fd)
                 close(fd)
             }
         }
+    }
+}
+
+// Delegate for microphone AVCaptureSession audio output
+class MicDelegate: NSObject, AVCaptureAudioDataOutputSampleBufferDelegate {
+    weak var recorder: Recorder?
+    init(recorder: Recorder) {
+        self.recorder = recorder
+        super.init()
+    }
+    func captureOutput(_ output: AVCaptureOutput, didOutput sampleBuffer: CMSampleBuffer, from connection: AVCaptureConnection) {
+        recorder?.appendMicSample(sampleBuffer)
     }
 }
 

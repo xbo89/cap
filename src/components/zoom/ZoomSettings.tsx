@@ -40,44 +40,18 @@ export function ZoomSettings({ segment, onSegmentChange }: ZoomSettingsProps) {
         onChange={(v) => update({ zoom_level: v })}
       />
 
-      <Slider
-        label="Follow Speed"
-        value={segment.follow_speed}
-        min={0.02}
-        max={0.5}
-        step={0.01}
-        displayValue={
-          segment.follow_speed < 0.1
-            ? "Cinematic"
-            : segment.follow_speed < 0.25
-            ? "Smooth"
-            : "Snappy"
-        }
-        onChange={(v) => update({ follow_speed: v })}
-      />
-
-      <Slider
-        label="Edge Padding"
-        value={segment.padding}
-        min={0}
-        max={300}
-        step={10}
-        displayValue={`${segment.padding}px`}
-        onChange={(v) => update({ padding: v })}
-      />
-
       {/* Follow Mouse toggle */}
       <div className="flex items-center justify-between pt-1">
         <span className="text-xs text-[#6e6e6e]">Follow Mouse</span>
         <button
-          className={`relative w-8 h-[18px] rounded-full transition-colors ${
+          className={`relative w-[34px] h-[18px] rounded-full transition-colors flex-shrink-0 ${
             segment.follow_mouse ? "bg-[#5b5bd6]" : "bg-white/10"
           }`}
           onClick={() => update({ follow_mouse: !segment.follow_mouse })}
         >
           <span
-            className={`absolute top-[2px] h-[14px] w-[14px] rounded-full bg-white transition-transform ${
-              segment.follow_mouse ? "translate-x-[14px]" : "translate-x-[2px]"
+            className={`absolute top-[2px] left-[2px] h-[14px] w-[14px] rounded-full bg-white transition-transform ${
+              segment.follow_mouse ? "translate-x-[16px]" : "translate-x-0"
             }`}
           />
         </button>
